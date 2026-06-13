@@ -125,8 +125,10 @@ export class AuthAppStack extends cdk.Stack {
     // Forward cookies, query strings, and the headers the API needs — plus
     // CloudFront-Viewer-Address, the tamper-proof source IP the service uses
     // for rate limiting (the leftmost X-Forwarded-For is client-spoofable).
-    // Host is omitted (execute-api rejects a foreign Host); Authorization is
-    // omitted here because CloudFront only forwards it via the cache policy.
+    // Host is omitted (execute-api rejects a foreign Host). Authorization can't
+    // be listed in an origin-request policy; the one endpoint that needs it
+    // (/oauth/userinfo, Bearer) gets its own behavior below using the managed
+    // ALL_VIEWER policy, which forwards Authorization automatically.
     const apiOriginRequestPolicy = new cloudfront.OriginRequestPolicy(
       this,
       "ApiOriginRequestPolicy",
@@ -146,22 +148,31 @@ export class AuthAppStack extends cdk.Stack {
         ),
       },
     );
-    // No caching (all TTLs 0), but Authorization must be in the cache policy
-    // for CloudFront to forward it to the origin (Bearer userinfo calls).
-    const apiCachePolicy = new cloudfront.CachePolicy(this, "ApiCachePolicy", {
-      defaultTtl: cdk.Duration.seconds(0),
-      minTtl: cdk.Duration.seconds(0),
-      maxTtl: cdk.Duration.seconds(0),
-      headerBehavior: cloudfront.CacheHeaderBehavior.allowList("Authorization"),
-      cookieBehavior: cloudfront.CacheCookieBehavior.none(),
-      queryStringBehavior: cloudfront.CacheQueryStringBehavior.none(),
-    });
     const apiBehavior: cloudfront.BehaviorOptions = {
       origin: apiOrigin,
       viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
       allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
-      cachePolicy: apiCachePolicy,
+      cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
       originRequestPolicy: apiOriginRequestPolicy,
+    };
+    // For JWKS/discovery: cache at the edge per the origin's Cache-Control, but
+    // do NOT key on (and thus forward) Host — the managed
+    // UseOriginCacheControlHeaders policy whitelists Host, which execute-api
+    // rejects. This custom policy keeps the TTLs unset (origin-driven) and an
+    // empty key.
+    const wellKnownCachePolicy = new cloudfront.CachePolicy(this, "WellKnownCachePolicy", {
+      headerBehavior: cloudfront.CacheHeaderBehavior.none(),
+      cookieBehavior: cloudfront.CacheCookieBehavior.none(),
+      queryStringBehavior: cloudfront.CacheQueryStringBehavior.none(),
+    });
+    // userinfo is Bearer-authenticated, so it needs Authorization forwarded
+    // (and doesn't need the viewer IP — it isn't IP rate-limited).
+    const bearerBehavior: cloudfront.BehaviorOptions = {
+      origin: apiOrigin,
+      viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+      allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
+      cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
+      originRequestPolicy: cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
     };
 
     // SPA client-side routing: rewrite extensionless paths to /index.html.
@@ -210,10 +221,13 @@ export class AuthAppStack extends cdk.Stack {
       additionalBehaviors: {
         "/api/*": apiBehavior,
         "/oauth/*": apiBehavior,
+        // More specific than /oauth/* — wins for the Bearer-authenticated path.
+        "/oauth/userinfo": bearerBehavior,
         "/.well-known/*": {
           ...apiBehavior,
-          // Honor the origin's Cache-Control (JWKS/discovery set their own).
-          cachePolicy: cloudfront.CachePolicy.USE_ORIGIN_CACHE_CONTROL_HEADERS,
+          // Honor the origin's Cache-Control (JWKS/discovery set their own)
+          // without forwarding Host.
+          cachePolicy: wellKnownCachePolicy,
         },
       },
     });

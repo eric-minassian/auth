@@ -64,6 +64,7 @@ http = "1"
 utoipa = { version = "5", features = ["axum_extras", "uuid", "time"] }
 utoipa-axum = "0.2"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "charset", "http2", "form"] }
+openssl = { version = "0.10.81", features = ["vendored"] }
 
 [dev-dependencies]
 axum-test = "20"

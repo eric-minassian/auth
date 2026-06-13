@@ -94,11 +94,16 @@ pub async fn authorize(
             return rp_error("login_required");
         }
         // Send the browser to the sign-in UI, which returns to this exact
-        // authorize URL after login.
-        let return_to = original_uri.to_string();
+        // authorize URL after login. Use the relative path+query only: behind
+        // API Gateway the reconstructed URI carries the internal execute-api
+        // host, which the SPA's same-origin return_to guard would reject.
+        let return_to = original_uri
+            .path_and_query()
+            .map(|pq| pq.as_str())
+            .unwrap_or("/oauth/authorize");
         return Redirect::to(&format!(
             "{issuer}/sign-in?return_to={}",
-            urlencoding(&return_to)
+            urlencoding(return_to)
         ));
     };
 
