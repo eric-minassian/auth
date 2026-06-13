@@ -1,0 +1,14 @@
+{
+  "$comment": "OIDC client registry — source of truth, seeded into DynamoDB by scripts/seed.ts. token_endpoint_auth_method is always 'none' (public clients with PKCE).",
+  "clients": [
+    {
+      "client_id": "demo",
+      "client_name": "Demo RP",
+      "redirect_uris": ["https://demo.ericminassian.com/auth/callback"],
+      "post_logout_redirect_uris": ["https://demo.ericminassian.com/"],
+      "backchannel_logout_uri": "https://demo.ericminassian.com/auth/backchannel-logout",
+      "allowed_origins": ["https://demo.ericminassian.com"],
+      "scopes": ["openid", "email", "offline_access"]
+    }
+  ]
+}

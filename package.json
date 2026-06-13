@@ -1,0 +1,20 @@
+{
+  "name": "auth-monorepo",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "concurrently -n db,api,web -c blue,yellow,green \"docker compose up\" \"cargo run --bin local\" \"pnpm --filter web dev\"",
+    "typecheck": "pnpm -r --if-present typecheck",
+    "lint": "pnpm -r --if-present lint",
+    "build": "pnpm -r --if-present build",
+    "test": "pnpm -r --if-present test",
+    "generate": "cargo run --bin export-openapi > openapi/openapi.json && pnpm --filter @eric-minassian/auth generate"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  },
+  "packageManager": "pnpm@11.6.0"
+}

@@ -1,0 +1,72 @@
+[package]
+name = "auth-service"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "auth-service"
+path = "src/main.rs"
+
+[[bin]]
+name = "local"
+path = "src/bin/local.rs"
+
+[[bin]]
+name = "export-openapi"
+path = "src/bin/export_openapi.rs"
+
+[dependencies]
+# HTTP / runtime
+axum = { version = "0.8", features = ["macros"] }
+axum-extra = { version = "0.12", features = ["cookie", "typed-header"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "request-id", "util"] }
+lambda_http = "1.2"
+
+# Crypto / credentials
+webauthn-rs = { version = "0.5", features = [
+  "danger-allow-state-serialisation",
+  "conditional-ui",
+] }
+jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
+p256 = { version = "0.13", features = ["ecdsa", "pem", "jwk"] }
+sha2 = "0.10"
+rand = "0.9"
+subtle = "2"
+
+# AWS
+aws-config = { version = "1", features = ["behavior-version-latest"] }
+aws-sdk-dynamodb = "1"
+aws-sdk-sesv2 = "1"
+aws-sdk-kms = "1"
+serde_dynamo = { version = "4", features = ["aws-sdk-dynamodb+1"] }
+
+# Domain plumbing
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+garde = { version = "0.23", features = ["derive", "email"] }
+uuid = { version = "1", features = ["v7", "serde"] }
+time = { version = "0.3", features = ["serde", "formatting", "parsing"] }
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+base64 = "0.22"
+url = "2"
+http = "1"
+
+# OpenAPI
+utoipa = { version = "5", features = ["axum_extras", "uuid", "time"] }
+utoipa-axum = "0.2"
+
+[dev-dependencies]
+axum-test = "20"
+proptest = "1"
+testcontainers = "0.27"
+testcontainers-modules = { version = "0.15", features = ["dynamodb"] }
+wiremock = "0.6"

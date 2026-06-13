@@ -1,0 +1,19 @@
+# Rust
+target/
+
+# Node
+node_modules/
+dist/
+
+# CDK
+cdk.out/
+
+# Local dev state (DynamoDB Local data, dev signing key, captured emails)
+.dev/
+
+# Test artifacts
+playwright-report/
+test-results/
+
+# Editors / OS
+.DS_Store
