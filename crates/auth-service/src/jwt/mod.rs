@@ -1,10 +1,12 @@
 pub mod claims;
+pub mod kms;
 pub mod local;
 
 use serde::Serialize;
 use serde_json::json;
 
 use crate::crypto::b64u;
+pub use kms::KmsSigner;
 pub use local::LocalSigner;
 
 #[derive(Debug, thiserror::Error)]
@@ -16,18 +18,19 @@ pub enum SignError {
 }
 
 /// Token signer. An enum (not a trait object) because the set of
-/// implementations is closed and async trait objects are not worth the
-/// ceremony: `Local` (p256 in-process; dev/tests) and `Kms` (AWS KMS
-/// asymmetric, prod — added with the infra milestone).
+/// implementations is closed: `Local` (p256 in-process; dev/tests) and `Kms`
+/// (AWS KMS asymmetric, prod — private key never leaves the HSM).
 #[derive(Clone)]
 pub enum Signer {
     Local(LocalSigner),
+    Kms(KmsSigner),
 }
 
 impl Signer {
     pub fn kid(&self) -> &str {
         match self {
             Self::Local(s) => s.kid(),
+            Self::Kms(s) => s.kid(),
         }
     }
 
@@ -35,6 +38,7 @@ impl Signer {
     pub fn public_jwk(&self) -> serde_json::Value {
         match self {
             Self::Local(s) => s.public_jwk(),
+            Self::Kms(s) => s.public_jwk(),
         }
     }
 
@@ -49,6 +53,7 @@ impl Signer {
         );
         let signature = match self {
             Self::Local(s) => s.sign_raw(signing_input.as_bytes())?,
+            Self::Kms(s) => s.sign_raw(signing_input.as_bytes()).await?,
         };
         Ok(format!("{signing_input}.{}", b64u(signature)))
     }

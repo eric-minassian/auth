@@ -1,0 +1,4 @@
+#!/bin/sh
+# Placeholder bootstrap. Overwritten by `cargo lambda build --release --arm64`
+# in the deploy workflow. Present so `cdk synth` works offline.
+echo "not the real binary"
