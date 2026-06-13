@@ -1,4 +1,4 @@
-use aws_sdk_dynamodb::types::{Put, TransactWriteItem};
+use aws_sdk_dynamodb::types::{Delete, Put, TransactWriteItem};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -110,23 +110,32 @@ impl Store {
         }
     }
 
-    /// Delete the user profile and the email-uniqueness pointer. Caller is
-    /// responsible for the dependent items (credentials, sessions, refresh
-    /// families) — see [`crate::api::account::delete_account`].
+    /// Delete the user profile and the email-uniqueness pointer atomically, so
+    /// a crash between the two can't orphan one (which would otherwise leave
+    /// the email permanently unregisterable, or the reverse). Caller handles
+    /// the dependent items (credentials, sessions, refresh families) — see
+    /// [`crate::api::account::delete_account`].
     pub async fn delete_user(&self, user: &User) -> Result<(), StoreError> {
+        let del = |pk: String, sk: &str| {
+            Delete::builder()
+                .table_name(&self.table)
+                .key("PK", s(pk))
+                .key("SK", s(sk))
+                .build()
+                .map_err(|e| StoreError::Sdk(e.to_string()))
+        };
         self.db
-            .delete_item()
-            .table_name(&self.table)
-            .key("PK", s(format!("USER#{}", user.user_id)))
-            .key("SK", s("PROFILE"))
-            .send()
-            .await
-            .map_err(map_sdk_err)?;
-        self.db
-            .delete_item()
-            .table_name(&self.table)
-            .key("PK", s(email_pk(&user.email)))
-            .key("SK", s("EMAIL"))
+            .transact_write_items()
+            .transact_items(
+                TransactWriteItem::builder()
+                    .delete(del(format!("USER#{}", user.user_id), "PROFILE")?)
+                    .build(),
+            )
+            .transact_items(
+                TransactWriteItem::builder()
+                    .delete(del(email_pk(&user.email), "EMAIL")?)
+                    .build(),
+            )
             .send()
             .await
             .map_err(map_sdk_err)?;

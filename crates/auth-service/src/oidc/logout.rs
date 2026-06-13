@@ -60,17 +60,28 @@ pub async fn logout(
     };
 
     // Revoke the current browser session (identified by the cookie) and clear
-    // it. The id_token_hint authorizes the request; the cookie identifies
-    // which session to end.
+    // it — but only if the id_token_hint identifies that same user. This stops
+    // a logout-CSRF where an attacker submits *their own* valid id_token to
+    // sign the victim out (the cookie picks the session, the hint must prove
+    // it's the same subject).
+    let hint_sub = claims["sub"].as_str();
     let mut jar = jar;
     if let Some(cookie) = jar.get(&state.cfg.cookie_name) {
         if let Ok(Some(session)) = state.store.get_session(cookie.value()).await {
-            if let Err(error) = revoke_session_cascade(&state, &session).await {
-                tracing::error!(?error, "logout: session cascade failed");
+            if hint_sub == Some(session.user_id.to_string().as_str()) {
+                if let Err(error) = revoke_session_cascade(&state, &session).await {
+                    tracing::error!(?error, "logout: session cascade failed");
+                }
+                jar = jar.add(clear_session_cookie(&state.cfg));
+                tracing::info!(target: "audit", event = "rp_initiated_logout", user_id = %session.user_id);
+            } else {
+                // Hint doesn't match the browser session — fall to the
+                // confirmation page rather than acting.
+                return (jar, confirm());
             }
-            tracing::info!(target: "audit", event = "rp_initiated_logout", user_id = %session.user_id);
+        } else {
+            jar = jar.add(clear_session_cookie(&state.cfg));
         }
-        jar = jar.add(clear_session_cookie(&state.cfg));
     }
 
     match redirect_target {

@@ -138,10 +138,15 @@ async fn full_code_pkce_flow_issues_verifiable_tokens() {
     assert_eq!(id_claims["nonce"], "noncevalue");
     assert_eq!(id_claims["email"], "oidc@example.com");
     assert_eq!(id_claims["email_verified"], true);
+    // The session was established by signup (email OTP) + passkey enrollment —
+    // no WebAuthn assertion occurred — so amr is ["otp"], NOT ["webauthn"].
+    // Only a real passkey login (login_finish) mints amr=["webauthn"].
     assert!(
         id_claims["amr"]
             .as_array()
-            .is_some_and(|a| a.iter().any(|m| m == "webauthn"))
+            .is_some_and(|a| a.iter().any(|m| m == "otp") && a.iter().all(|m| m != "webauthn")),
+        "enrollment session must not claim webauthn amr: {:?}",
+        id_claims["amr"]
     );
     let kid = jsonwebtoken::decode_header(id_token).expect("header").kid;
     assert_eq!(kid.as_deref(), jwks["keys"][0]["kid"].as_str());

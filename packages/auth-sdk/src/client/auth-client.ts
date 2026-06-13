@@ -248,6 +248,12 @@ function userFromIdToken(idToken: string): User | undefined {
       exp?: number;
     };
     if (!payload.sub) return undefined;
+    // Don't surface an expired token as a signed-in user. This is a display
+    // decision only — the access token (verified server-side) is the real
+    // credential — but a stale id_token shouldn't rehydrate `authenticated`.
+    if (typeof payload.exp === "number" && payload.exp * 1000 <= Date.now()) {
+      return undefined;
+    }
     const user: User = { sub: payload.sub };
     if (payload.email !== undefined) user.email = payload.email;
     if (payload.email_verified !== undefined) user.emailVerified = payload.email_verified;

@@ -105,13 +105,37 @@ describe("createAuthVerifier", () => {
     const result = await verifier.verifyLogoutToken(logoutToken);
     expect(result).toEqual({ sub: "user-1", sid: "sid-1" });
 
-    const withNonce = await sign({
+    const withNonce = await sign(
+      {
+        sub: "user-1",
+        sid: "sid-1",
+        jti: "j",
+        nonce: "no",
+        events: { "http://schemas.openid.net/event/backchannel-logout": {} },
+      },
+      "logout+jwt",
+    );
+    await expect(verifier.verifyLogoutToken(withNonce)).rejects.toBeInstanceOf(AuthError);
+  });
+
+  it("rejects an access token replayed as a logout token (typ pinned)", async () => {
+    const verifier = createAuthVerifier({ issuer: ISSUER, audience: AUDIENCE });
+    // typ defaults to at+jwt; even with a logout events claim it must not pass.
+    const accessShaped = await sign({
       sub: "user-1",
       sid: "sid-1",
       jti: "j",
-      nonce: "no",
       events: { "http://schemas.openid.net/event/backchannel-logout": {} },
     });
-    await expect(verifier.verifyLogoutToken(withNonce)).rejects.toBeInstanceOf(AuthError);
+    await expect(verifier.verifyLogoutToken(accessShaped)).rejects.toBeInstanceOf(AuthError);
+  });
+
+  it("rejects a logout token that identifies neither sub nor sid", async () => {
+    const verifier = createAuthVerifier({ issuer: ISSUER, audience: AUDIENCE });
+    const noSubject = await sign(
+      { jti: "j", events: { "http://schemas.openid.net/event/backchannel-logout": {} } },
+      "logout+jwt",
+    );
+    await expect(verifier.verifyLogoutToken(noSubject)).rejects.toBeInstanceOf(AuthError);
   });
 });

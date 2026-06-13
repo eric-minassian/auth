@@ -11,6 +11,7 @@ use crate::domain::otp::OtpPurpose;
 use crate::domain::session::SessionLevel;
 use crate::email::templates;
 use crate::error::ApiError;
+use crate::session::logout::revoke_session_cascade;
 use crate::session::session_cookie;
 use crate::state::AppState;
 use crate::store::rate_limit::RateClass;
@@ -97,6 +98,14 @@ pub async fn verify(
         .get_user_by_email(&email)
         .await?
         .ok_or_else(|| ApiError::BadRequest("invalid or expired code".to_string()))?;
+
+    // Recovery is a reset, not an additive grant: revoke every existing
+    // session (and its refresh families, via the cascade) so a mailbox
+    // compromise cannot silently coexist with the victim's live sessions, and
+    // the legitimate user is forced to re-authenticate everywhere.
+    for session in state.store.list_sessions(user.user_id).await? {
+        revoke_session_cascade(&state, &session).await?;
+    }
 
     let (sid, _session) = state
         .store

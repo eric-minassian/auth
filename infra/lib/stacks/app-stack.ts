@@ -122,14 +122,46 @@ export class AuthAppStack extends cdk.Stack {
       `${httpApi.apiId}.execute-api.${this.region}.amazonaws.com`,
       { protocolPolicy: cloudfront.OriginProtocolPolicy.HTTPS_ONLY },
     );
+    // Forward cookies, query strings, and the headers the API needs — plus
+    // CloudFront-Viewer-Address, the tamper-proof source IP the service uses
+    // for rate limiting (the leftmost X-Forwarded-For is client-spoofable).
+    // Host is omitted (execute-api rejects a foreign Host); Authorization is
+    // omitted here because CloudFront only forwards it via the cache policy.
+    const apiOriginRequestPolicy = new cloudfront.OriginRequestPolicy(
+      this,
+      "ApiOriginRequestPolicy",
+      {
+        cookieBehavior: cloudfront.OriginRequestCookieBehavior.all(),
+        queryStringBehavior: cloudfront.OriginRequestQueryStringBehavior.all(),
+        headerBehavior: cloudfront.OriginRequestHeaderBehavior.allowList(
+          "CloudFront-Viewer-Address",
+          "Origin",
+          "Content-Type",
+          "Accept",
+          "Referer",
+          "User-Agent",
+          "Sec-Fetch-Site",
+          "Sec-Fetch-Mode",
+          "Sec-Fetch-Dest",
+        ),
+      },
+    );
+    // No caching (all TTLs 0), but Authorization must be in the cache policy
+    // for CloudFront to forward it to the origin (Bearer userinfo calls).
+    const apiCachePolicy = new cloudfront.CachePolicy(this, "ApiCachePolicy", {
+      defaultTtl: cdk.Duration.seconds(0),
+      minTtl: cdk.Duration.seconds(0),
+      maxTtl: cdk.Duration.seconds(0),
+      headerBehavior: cloudfront.CacheHeaderBehavior.allowList("Authorization"),
+      cookieBehavior: cloudfront.CacheCookieBehavior.none(),
+      queryStringBehavior: cloudfront.CacheQueryStringBehavior.none(),
+    });
     const apiBehavior: cloudfront.BehaviorOptions = {
       origin: apiOrigin,
       viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
       allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
-      cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
-      // Forwards cookies, query strings, and all headers except Host (which
-      // execute-api endpoints require to be their own).
-      originRequestPolicy: cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
+      cachePolicy: apiCachePolicy,
+      originRequestPolicy: apiOriginRequestPolicy,
     };
 
     // SPA client-side routing: rewrite extensionless paths to /index.html.

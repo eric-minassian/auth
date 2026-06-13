@@ -99,8 +99,9 @@ pub struct RegisterFinishRequest {
 pub async fn register_finish(
     State(state): State<AppState>,
     AnySession(session): AnySession,
+    jar: CookieJar,
     Json(req): Json<RegisterFinishRequest>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<(CookieJar, Json<Value>), ApiError> {
     let (owner, reg_state): (Option<uuid::Uuid>, PasskeyRegistration) = state
         .store
         .consume_ceremony(&req.ceremony_id, CeremonyPurpose::Registration)
@@ -125,14 +126,22 @@ pub async fn register_finish(
         .store
         .put_credential(session.user_id, &credential_id, &passkey, &name)
         .await?;
+
+    // Elevating an enroll session to full: rotate the session id (defeats
+    // fixation) and delete the old one. The amr stays ["otp"] — enrolling a
+    // passkey is credential provisioning, not a WebAuthn assertion, so we must
+    // NOT claim "webauthn" here; only login_finish mints that.
+    let mut jar = jar;
     if session.level == SessionLevel::Enroll {
-        state
+        let (new_sid, _) = state
             .store
-            .upgrade_session_to_full(&session.sid_hash)
+            .create_session(session.user_id, SessionLevel::Full, session.amr.clone())
             .await?;
+        state.store.delete_session(&session.sid_hash).await?;
+        jar = jar.add(session_cookie(&state.cfg, new_sid));
     }
     tracing::info!(target: "audit", event = "passkey_registered", user_id = %session.user_id);
-    Ok(Json(json!({ "credential_id": credential_id })))
+    Ok((jar, Json(json!({ "credential_id": credential_id }))))
 }
 
 /// Which authentication ceremony was started; parked in the ceremony store.

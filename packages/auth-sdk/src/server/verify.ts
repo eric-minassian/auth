@@ -55,6 +55,8 @@ export function createAuthVerifier(options: VerifierOptions): AuthVerifier {
         audience: options.audience,
         clockTolerance,
         typ: "at+jwt",
+        // Pin the algorithm — never let the JWS header pick it (alg confusion).
+        algorithms: ["ES256"],
       });
       return payload as unknown as AccessTokenClaims;
     } catch (error) {
@@ -83,6 +85,10 @@ export function createAuthVerifier(options: VerifierOptions): AuthVerifier {
           issuer,
           audience: options.audience,
           clockTolerance,
+          // Per OIDC Back-Channel Logout 1.0: typ MUST be logout+jwt, so an
+          // access/ID token can never be replayed through this path.
+          typ: "logout+jwt",
+          algorithms: ["ES256"],
         });
         const events = payload["events"] as Record<string, unknown> | undefined;
         if (!events?.["http://schemas.openid.net/event/backchannel-logout"]) {
@@ -94,6 +100,10 @@ export function createAuthVerifier(options: VerifierOptions): AuthVerifier {
         const result: { sub?: string; sid?: string } = {};
         if (typeof payload.sub === "string") result.sub = payload.sub;
         if (typeof payload["sid"] === "string") result.sid = payload["sid"] as string;
+        // Spec MUST: a logout token identifies a subject, a session, or both.
+        if (result.sub === undefined && result.sid === undefined) {
+          throw new AuthError("invalid_token", "logout token has neither sub nor sid");
+        }
         return result;
       } catch (error) {
         if (error instanceof AuthError) throw error;

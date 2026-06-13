@@ -22,12 +22,32 @@ async fn register_upgrades_enroll_session_to_full() {
     res.assert_status(StatusCode::OK);
     let body: serde_json::Value = res.json();
     assert_eq!(body["user"]["email"], "pk@example.com");
+    // Enrolling a passkey is NOT a WebAuthn assertion: the upgraded session
+    // keeps amr=["otp"] and must not claim "webauthn" (that would mislead RPs
+    // gating phishing-resistant actions).
+    let amr = body["session"]["amr"].as_array().expect("amr array");
+    assert!(amr.iter().any(|m| m == "otp"));
     assert!(
-        body["session"]["amr"]
-            .as_array()
-            .is_some_and(|amr| amr.iter().any(|m| m == "webauthn")),
-        "amr should include webauthn after upgrade"
+        amr.iter().all(|m| m != "webauthn"),
+        "enrollment session must not claim webauthn: {amr:?}"
     );
+}
+
+#[tokio::test]
+async fn passkey_login_yields_webauthn_amr() {
+    let mut app = TestApp::spawn().await;
+    let mut authenticator = new_authenticator();
+
+    signup_with_passkey(&mut app, "amr@example.com", &mut authenticator).await;
+    app.post("/api/session/logout", &json!({}))
+        .await
+        .assert_status(StatusCode::OK);
+
+    // A real passkey assertion DOES mint amr=["webauthn"].
+    login(&mut app, "amr@example.com", &mut authenticator).await;
+    let body: serde_json::Value = app.server.get("/api/session").await.json();
+    let amr = body["session"]["amr"].as_array().expect("amr array");
+    assert!(amr.iter().any(|m| m == "webauthn"));
 }
 
 #[tokio::test]

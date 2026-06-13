@@ -184,3 +184,30 @@ async fn revoke_endpoint_kills_the_family() {
         .await;
     res.assert_status(StatusCode::OK);
 }
+
+#[tokio::test]
+async fn recovery_revokes_prior_refresh_tokens() {
+    let mut app = TestApp::spawn().await;
+    let rt0 = bootstrap(&mut app, "recover@example.com").await;
+
+    // Account recovery (email OTP) is a reset: it revokes prior sessions and
+    // their refresh families, so a mailbox-compromise attacker can't coexist
+    // with the victim's live tokens.
+    app.post(
+        "/api/recovery/start",
+        &serde_json::json!({ "email": "recover@example.com" }),
+    )
+    .await
+    .assert_status(StatusCode::OK);
+    let code = app.take_otp("recover@example.com");
+    app.post(
+        "/api/recovery/verify",
+        &serde_json::json!({ "email": "recover@example.com", "code": code }),
+    )
+    .await
+    .assert_status(StatusCode::OK);
+
+    let (status, body) = refresh(&app, &rt0, "rp").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "invalid_grant");
+}

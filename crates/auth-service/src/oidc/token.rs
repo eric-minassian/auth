@@ -205,18 +205,14 @@ async fn refresh(state: &AppState, req: &TokenRequest) -> Result<TokenResponse, 
 
     // The IdP session backing this family must still be alive: refresh
     // tokens die with the session (logout cascade).
-    let session_alive = state
-        .store
-        .get_session_by_hash(&family.sid_hash)
-        .await?
-        .is_some_and(|s| !s.is_expired(now()));
-    if !session_alive {
+    let session = state.store.get_session_by_hash(&family.sid_hash).await?;
+    let Some(session) = session.filter(|s| !s.is_expired(now())) else {
         state
             .store
             .revoke_refresh_family(&family.family_id, "session_gone")
             .await?;
         return Err(OAuthError::invalid_grant());
-    }
+    };
 
     let user = state
         .store
@@ -233,8 +229,10 @@ async fn refresh(state: &AppState, req: &TokenRequest) -> Result<TokenResponse, 
             sid_hash: &family.sid_hash,
             scope: &family.scope,
             nonce: None,
-            auth_time: family.created_at,
-            amr: &["webauthn".to_string()],
+            auth_time: session.created_at,
+            // Carry the real authentication methods from the session, not a
+            // hardcoded value — a session may be OTP-only (post-recovery).
+            amr: &session.amr,
             refresh_token: Some(new_token),
         },
     )

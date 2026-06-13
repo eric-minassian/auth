@@ -99,37 +99,6 @@ impl Store {
         }
     }
 
-    /// Upgrade an enroll session to full (first passkey registered).
-    pub async fn upgrade_session_to_full(&self, sid_hash: &str) -> Result<(), StoreError> {
-        let ts = now();
-        self.db
-            .update_item()
-            .table_name(&self.table)
-            .key("PK", s(session_pk(sid_hash)))
-            .key("SK", s("SESSION"))
-            .update_expression(
-                "SET #level = :full, amr = :amr, idle_expires_at = :idle, absolute_expires_at = :abs, #ttl = :ttl",
-            )
-            .condition_expression("attribute_exists(PK)")
-            .expression_attribute_names("#level", "level")
-            .expression_attribute_names("#ttl", "ttl")
-            .expression_attribute_values(":full", AttributeValue::S("full".to_string()))
-            .expression_attribute_values(
-                ":amr",
-                AttributeValue::L(vec![
-                    AttributeValue::S("otp".to_string()),
-                    AttributeValue::S("webauthn".to_string()),
-                ]),
-            )
-            .expression_attribute_values(":idle", n(ts + SESSION_IDLE_SECS))
-            .expression_attribute_values(":abs", n(ts + SESSION_ABSOLUTE_SECS))
-            .expression_attribute_values(":ttl", n(ts + SESSION_ABSOLUTE_SECS + 7 * 24 * 3600))
-            .send()
-            .await
-            .map_err(map_sdk_err)?;
-        Ok(())
-    }
-
     /// Rolling idle-window bump; called from authenticated request paths when
     /// the session hasn't been touched recently. Absolute expiry never moves.
     pub async fn touch_session(&self, sid_hash: &str) -> Result<(), StoreError> {

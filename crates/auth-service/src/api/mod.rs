@@ -11,16 +11,31 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use utoipa::ToSchema;
 
-/// Best-effort client IP for rate limiting. Behind CloudFront/API Gateway the
-/// first X-Forwarded-For entry is the viewer address.
+/// Trustworthy client IP for rate limiting.
+///
+/// `CloudFront-Viewer-Address` is set by CloudFront and overwrites any
+/// client-supplied value, so it is the authoritative source IP in production.
+/// We must NOT trust the leftmost `X-Forwarded-For` entry — it is fully
+/// client-controlled and would let an attacker rotate the rate-limit key at
+/// will. The XFF fallback (for local dev behind Vite's proxy) takes the
+/// rightmost entry, which is the one appended by the nearest trusted proxy.
 pub fn client_ip(headers: &HeaderMap) -> String {
-    headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.split(',').next())
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| "unknown".to_string())
+    let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
+
+    // "<ip>:<port>" — split off the port from the right (handles IPv6 colons).
+    if let Some((ip, _port)) = header("cloudfront-viewer-address").and_then(|a| a.rsplit_once(':'))
+        && !ip.is_empty()
+    {
+        return ip.to_string();
+    }
+
+    if let Some(ip) = header("x-forwarded-for")
+        .and_then(|xff| xff.split(',').map(str::trim).rfind(|s| !s.is_empty()))
+    {
+        return ip.to_string();
+    }
+
+    "unknown".to_string()
 }
 
 /// Generic success envelope (`{ "ok": true }`).

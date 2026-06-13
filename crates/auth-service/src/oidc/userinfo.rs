@@ -55,5 +55,9 @@ pub async fn userinfo(State(state): State<AppState>, headers: HeaderMap) -> Resp
         body["email"] = json!(user.email);
         body["email_verified"] = json!(user.email_verified);
     }
-    Json(body).into_response()
+    (
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(body),
+    )
+        .into_response()
 }
