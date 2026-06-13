@@ -90,11 +90,15 @@ export class AuthAppStack extends cdk.Stack {
     });
     props.table.grantReadWriteData(fn);
     props.signingKey.grant(fn, "kms:Sign", "kms:GetPublicKey");
-    // SES has no grant* on the identity; scope SendEmail to our identity ARN.
+    // SES has no grant* on the identity. SendEmail is authorized against the
+    // From identity (prod) and, in the sandbox, also against the verified
+    // recipient identity — so scope to all identities in our account/region
+    // rather than just the sending domain. (The Lambda only ever sends from
+    // EMAIL_FROM, so the actual From address is fixed in code.)
     fn.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ["ses:SendEmail", "ses:SendRawEmail"],
-        resources: [`arn:aws:ses:${this.region}:${this.account}:identity/${host}`],
+        resources: [`arn:aws:ses:${this.region}:${this.account}:identity/*`],
       }),
     );
 
