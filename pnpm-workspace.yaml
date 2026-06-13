@@ -2,3 +2,7 @@ packages:
   - "apps/*"
   - "packages/*"
   - "infra"
+
+# esbuild's postinstall links its platform binary; tsdown/vitest need it.
+allowBuilds:
+  esbuild: true

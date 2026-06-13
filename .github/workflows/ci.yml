@@ -46,5 +46,13 @@ jobs:
           node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - name: Check SDK wire types match the spec
+        run: |
+          pnpm --filter @eric-minassian/auth generate
+          if ! git diff --exit-code packages/auth-sdk/src/generated; then
+            echo "::error::SDK types are stale. Run 'pnpm --filter @eric-minassian/auth generate' and commit."
+            exit 1
+          fi
       - run: pnpm typecheck
       - run: pnpm build
+      - run: pnpm -r --if-present test

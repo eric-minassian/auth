@@ -1,0 +1,79 @@
+{
+  "name": "@eric-minassian/auth",
+  "version": "0.1.0",
+  "description": "TypeScript SDK for auth.ericminassian.com — OIDC client, React bindings, and server-side JWT verification.",
+  "license": "MIT",
+  "type": "module",
+  "sideEffects": false,
+  "engines": {
+    "node": ">=20.19"
+  },
+  "files": [
+    "dist"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./client": {
+      "types": "./dist/client/index.d.ts",
+      "default": "./dist/client/index.js"
+    },
+    "./react": {
+      "types": "./dist/react/index.d.ts",
+      "default": "./dist/react/index.js"
+    },
+    "./server": {
+      "types": "./dist/server/index.d.ts",
+      "default": "./dist/server/index.js"
+    },
+    "./server/hono": {
+      "types": "./dist/server/hono.d.ts",
+      "default": "./dist/server/hono.js"
+    },
+    "./server/express": {
+      "types": "./dist/server/express.d.ts",
+      "default": "./dist/server/express.js"
+    }
+  },
+  "scripts": {
+    "build": "tsdown",
+    "typecheck": "tsc --noEmit",
+    "generate": "openapi-typescript ../../openapi/openapi.json -o src/generated/api.d.ts",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "jose": "^6"
+  },
+  "peerDependencies": {
+    "react": ">=18",
+    "hono": ">=4",
+    "express": ">=5"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    },
+    "hono": {
+      "optional": true
+    },
+    "express": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/react": "^19",
+    "express": "^5.1.0",
+    "hono": "^4.6.0",
+    "openapi-typescript": "^7.4.0",
+    "react": "^19.0.0",
+    "tsdown": "^0.15.0",
+    "typescript": "~5.7.0",
+    "vitest": "^3.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
