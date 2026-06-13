@@ -1,3 +1,5 @@
+pub mod ceremonies;
+pub mod credentials;
 pub mod otp;
 pub mod rate_limit;
 pub mod schema;

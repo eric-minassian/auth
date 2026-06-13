@@ -69,4 +69,5 @@ axum-test = "20"
 proptest = "1"
 testcontainers = "0.27"
 testcontainers-modules = { version = "0.15", features = ["dynamodb"] }
+webauthn-authenticator-rs = { version = "0.5.5", features = ["softpasskey"] }
 wiremock = "0.6"

@@ -136,9 +136,12 @@ async fn recovery_flow_issues_enroll_session() {
     .assert_status(StatusCode::OK);
 
     // Recovery for an unknown email: uniform 200, no email at all.
-    app.post("/api/recovery/start", &json!({ "email": "ghost@example.com" }))
-        .await
-        .assert_status(StatusCode::OK);
+    app.post(
+        "/api/recovery/start",
+        &json!({ "email": "ghost@example.com" }),
+    )
+    .await
+    .assert_status(StatusCode::OK);
     assert!(app.last_email_to("ghost@example.com").is_none());
 
     // Recovery for the real account.

@@ -1,7 +1,9 @@
+pub mod account;
 pub mod dev;
 pub mod recovery;
 pub mod session;
 pub mod signup;
+pub mod webauthn;
 
 use axum::Json;
 use axum::http::HeaderMap;

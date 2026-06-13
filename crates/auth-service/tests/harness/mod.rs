@@ -9,14 +9,16 @@ use auth_service::config::AppConfig;
 use auth_service::email::{EmailMessage, Mailer};
 use auth_service::jwt::{LocalSigner, Signer};
 use auth_service::state::AppState;
-use auth_service::store::{schema, Store};
+use auth_service::store::{Store, schema};
 use axum_test::TestServer;
-use testcontainers::runners::AsyncRunner;
 use testcontainers::ContainerAsync;
+use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::dynamodb_local::DynamoDb;
 use tokio::sync::mpsc::UnboundedReceiver;
 
-pub const ISSUER: &str = "http://auth.localhost";
+// Plain `localhost`: webauthn-authenticator-rs only permits http origins for
+// the literal localhost domain (browsers are more lenient with *.localhost).
+pub const ISSUER: &str = "http://localhost";
 
 pub struct TestApp {
     pub server: TestServer,
