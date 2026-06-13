@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 
 use crate::error::ApiError;
 use crate::session::extract::FullSession;
+use crate::session::logout::revoke_session_cascade;
 use crate::state::AppState;
 use crate::store::StoreError;
 use crate::store::rate_limit::RateClass;
@@ -120,12 +121,47 @@ pub async fn revoke_session(
 ) -> Result<Json<Value>, ApiError> {
     rate_limit_account(&state, &session.sid_hash).await?;
     let sessions = state.store.list_sessions(session.user_id).await?;
-    if !sessions.iter().any(|s| s.sid_hash == session_id) {
+    let Some(target) = sessions.into_iter().find(|s| s.sid_hash == session_id) else {
         return Err(ApiError::NotFound);
-    }
-    state.store.delete_session(&session_id).await?;
+    };
+    revoke_session_cascade(&state, &target).await?;
     tracing::info!(target: "audit", event = "session_revoked", user_id = %session.user_id);
     Ok(Json(json!({ "ok": true })))
+}
+
+/// DELETE /api/account — permanently delete the account and everything bound
+/// to it: passkeys, sessions (each cascading to refresh families +
+/// back-channel logout), then the user record itself.
+pub async fn delete_account(
+    State(state): State<AppState>,
+    FullSession(session): FullSession,
+    jar: axum_extra::extract::CookieJar,
+) -> Result<(axum_extra::extract::CookieJar, Json<Value>), ApiError> {
+    rate_limit_account(&state, &session.sid_hash).await?;
+    let user = state
+        .store
+        .get_user(session.user_id)
+        .await?
+        .ok_or(ApiError::Unauthorized)?;
+
+    for credential in state.store.list_credentials(user.user_id).await? {
+        state
+            .store
+            .delete_credential(user.user_id, &credential.credential_id)
+            .await?;
+    }
+    // Revoking every session also revokes its refresh families and dispatches
+    // back-channel logout to RPs.
+    for s in state.store.list_sessions(user.user_id).await? {
+        revoke_session_cascade(&state, &s).await?;
+    }
+    state.store.delete_user(&user).await?;
+    tracing::info!(target: "audit", event = "account_deleted", user_id = %user.user_id);
+
+    Ok((
+        jar.add(crate::session::clear_session_cookie(&state.cfg)),
+        Json(json!({ "ok": true })),
+    ))
 }
 
 async fn rate_limit_account(state: &AppState, sid_hash: &str) -> Result<(), ApiError> {

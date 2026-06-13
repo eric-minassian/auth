@@ -15,6 +15,9 @@ pub struct AppState {
     pub signer: Arc<Signer>,
     pub webauthn: Arc<Webauthn>,
     pub mailer: Arc<Mailer>,
+    /// HTTP client for back-channel logout dispatch (short timeout,
+    /// best-effort).
+    pub http: reqwest::Client,
 }
 
 impl AppState {
@@ -27,12 +30,17 @@ impl AppState {
         let webauthn = WebauthnBuilder::new(&cfg.rp_id, &cfg.rp_origin)?
             .rp_name("ericminassian.com")
             .build()?;
+        let http = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(3))
+            .build()
+            .unwrap_or_default();
         Ok(Self {
             cfg: Arc::new(cfg),
             store,
             signer: Arc::new(signer),
             webauthn: Arc::new(webauthn),
             mailer: Arc::new(mailer),
+            http,
         })
     }
 }

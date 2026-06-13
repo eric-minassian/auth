@@ -52,7 +52,8 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/api/account/sessions/{session_id}",
             delete(api::account::revoke_session),
-        );
+        )
+        .route("/api/account", delete(api::account::delete_account));
 
     if state.cfg.dev_mode {
         router = router.route("/api/dev/last-otp", get(api::dev::last_otp));
@@ -80,6 +81,7 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/.well-known/jwks.json", get(oidc::jwks::jwks))
         .route("/oauth/authorize", get(oidc::authorize::authorize))
+        .route("/oauth/logout", get(oidc::logout::logout))
         .merge(oauth);
 
     router

@@ -2,6 +2,7 @@ pub mod authorize;
 pub mod cors;
 pub mod discovery;
 pub mod jwks;
+pub mod logout;
 pub mod pkce;
 pub mod revoke;
 pub mod token;

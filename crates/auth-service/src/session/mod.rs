@@ -1,4 +1,5 @@
 pub mod extract;
+pub mod logout;
 
 use axum_extra::extract::cookie::{Cookie, SameSite};
 use time::Duration;

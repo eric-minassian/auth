@@ -109,4 +109,27 @@ impl Store {
             None => Ok(None),
         }
     }
+
+    /// Delete the user profile and the email-uniqueness pointer. Caller is
+    /// responsible for the dependent items (credentials, sessions, refresh
+    /// families) — see [`crate::api::account::delete_account`].
+    pub async fn delete_user(&self, user: &User) -> Result<(), StoreError> {
+        self.db
+            .delete_item()
+            .table_name(&self.table)
+            .key("PK", s(format!("USER#{}", user.user_id)))
+            .key("SK", s("PROFILE"))
+            .send()
+            .await
+            .map_err(map_sdk_err)?;
+        self.db
+            .delete_item()
+            .table_name(&self.table)
+            .key("PK", s(email_pk(&user.email)))
+            .key("SK", s("EMAIL"))
+            .send()
+            .await
+            .map_err(map_sdk_err)?;
+        Ok(())
+    }
 }

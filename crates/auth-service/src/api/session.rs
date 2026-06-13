@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 use crate::error::ApiError;
 use crate::session::clear_session_cookie;
 use crate::session::extract::{AnySession, FullSession};
+use crate::session::logout::revoke_session_cascade;
 use crate::state::AppState;
 
 /// GET /api/session — whoami for the SPA.
@@ -30,14 +31,15 @@ pub async fn get(
     })))
 }
 
-/// POST /api/session/logout — destroys the IdP session. (The back-channel
-/// logout cascade to RPs is wired in with the OIDC logout milestone.)
+/// POST /api/session/logout — destroys the IdP session and cascades:
+/// revokes refresh families bound to it and dispatches back-channel logout
+/// to affected RPs.
 pub async fn logout(
     State(state): State<AppState>,
     AnySession(session): AnySession,
     jar: CookieJar,
 ) -> Result<(CookieJar, Json<Value>), ApiError> {
-    state.store.delete_session(&session.sid_hash).await?;
+    revoke_session_cascade(&state, &session).await?;
     tracing::info!(target: "audit", event = "logout", user_id = %session.user_id);
     Ok((
         jar.add(clear_session_cookie(&state.cfg)),
