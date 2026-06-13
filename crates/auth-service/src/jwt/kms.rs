@@ -94,8 +94,8 @@ impl KmsSigner {
 /// Convert a DER-encoded ECDSA signature into the raw 64-byte `r||s` form,
 /// normalizing to low-S (BIP-0062 / JWS expectation).
 pub fn der_to_raw(der: &[u8]) -> Result<Vec<u8>, SignError> {
-    let signature =
-        Signature::from_der(der).map_err(|e| SignError::Signature(format!("parse der sig: {e}")))?;
+    let signature = Signature::from_der(der)
+        .map_err(|e| SignError::Signature(format!("parse der sig: {e}")))?;
     let normalized = signature.normalize_s().unwrap_or(signature);
     Ok(normalized.to_bytes().to_vec())
 }
@@ -104,7 +104,7 @@ pub fn der_to_raw(der: &[u8]) -> Result<Vec<u8>, SignError> {
 mod tests {
     use super::*;
     use p256::ecdsa::signature::Signer as _;
-    use p256::ecdsa::{signature::Verifier, SigningKey, VerifyingKey};
+    use p256::ecdsa::{SigningKey, VerifyingKey, signature::Verifier};
 
     #[test]
     fn der_to_raw_round_trips_and_verifies() {

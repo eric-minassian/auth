@@ -56,3 +56,21 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm build
       - run: pnpm -r --if-present test
+
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: cargo build --bin local
+      - name: Install Playwright Chromium
+        run: pnpm --filter web exec playwright install --with-deps chromium
+      - name: Run E2E (boots DynamoDB Local + Rust API + Vite)
+        run: pnpm --filter web exec playwright test

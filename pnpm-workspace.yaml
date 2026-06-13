@@ -4,5 +4,8 @@ packages:
   - "infra"
 
 # esbuild's postinstall links its platform binary; tsdown/vitest need it.
+# @eric-minassian/design is a git dep whose `prepare` compiles dist/ (the
+# key must be the resolved git tarball spec, pinned by the lockfile sha).
 allowBuilds:
   esbuild: true
+  "@eric-minassian/design@https://codeload.github.com/eric-minassian/design/tar.gz/9f31b3baa517d4812acde9a4c7825b3498e65352": true

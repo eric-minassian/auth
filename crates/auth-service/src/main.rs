@@ -22,9 +22,7 @@ async fn main() -> Result<(), Error> {
     // Production signs with KMS (non-extractable key). A PEM fallback exists
     // only for environments where KMS isn't wired (e.g. an ad-hoc test stage).
     let signer = match std::env::var("KMS_KEY_ID") {
-        Ok(key_id) => {
-            Signer::Kms(KmsSigner::new(aws_sdk_kms::Client::new(&aws), key_id).await?)
-        }
+        Ok(key_id) => Signer::Kms(KmsSigner::new(aws_sdk_kms::Client::new(&aws), key_id).await?),
         Err(_) => match std::env::var("SIGNING_KEY_PEM") {
             Ok(pem) => Signer::Local(LocalSigner::from_pem(&pem)?),
             Err(_) => return Err("neither KMS_KEY_ID nor SIGNING_KEY_PEM is set".into()),

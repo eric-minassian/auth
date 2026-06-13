@@ -16,10 +16,13 @@ export function prodConfig(): AuthConfig {
     },
     domain: "ericminassian.com",
     subdomain: "auth",
-    // Overwritten by `cargo lambda build` output in the deploy workflow; a
-    // committed placeholder keeps `cdk synth` working offline.
-    lambdaAssetPath: "assets/lambda-bootstrap",
-    // Built by `pnpm --filter web build`; placeholder for offline synth.
-    spaAssetPath: "assets/spa-placeholder",
+    // Points at `cargo lambda build` output in the deploy workflow
+    // (`LAMBDA_DIST` env); a committed placeholder keeps `cdk synth` working
+    // offline.
+    lambdaAssetPath: process.env.LAMBDA_DIST ?? "assets/lambda-bootstrap",
+    // Built by `pnpm --filter web build`; the deploy workflow points this at
+    // the real dist (`SPA_DIST` env) and falls back to a placeholder so
+    // `cdk synth` works offline.
+    spaAssetPath: process.env.SPA_DIST ?? "assets/spa-placeholder",
   };
 }

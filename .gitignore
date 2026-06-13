@@ -17,3 +17,8 @@ test-results/
 
 # Editors / OS
 .DS_Store
+
+# Playwright
+/apps/web/test-results/
+/apps/web/playwright-report/
+/apps/web/.playwright/

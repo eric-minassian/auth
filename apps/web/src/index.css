@@ -1,0 +1,9 @@
+@import "tailwindcss";
+@import "@eric-minassian/design/globals.css";
+@source "../node_modules/@eric-minassian/design";
+
+html,
+body,
+#root {
+  height: 100%;
+}

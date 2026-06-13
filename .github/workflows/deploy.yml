@@ -1,0 +1,65 @@
+name: Deploy
+
+# Manual only — never auto-deploy.
+on:
+  workflow_dispatch:
+    inputs:
+      stacks:
+        description: "Which stacks to deploy"
+        type: choice
+        default: "AuthApp"
+        options: ["AuthApp", "AuthStateful", "--all"]
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      AWS_REGION: us-east-1
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-lambda
+        run: pip install cargo-lambda
+
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      - name: Build Rust Lambda (ARM64)
+        run: cargo lambda build --release --arm64 --bin auth-service
+      - name: Build SPA
+        run: pnpm --filter web build
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: CDK deploy
+        working-directory: infra
+        env:
+          # CDK reads these to locate the built artifacts (see config/prod.ts).
+          LAMBDA_DIST: ../target/lambda/auth-service
+          SPA_DIST: ../apps/web/dist
+        run: pnpm exec cdk deploy ${{ inputs.stacks }} --require-approval never
+
+      - name: Seed OIDC clients
+        if: inputs.stacks != 'AuthStateful'
+        working-directory: infra
+        run: pnpm exec tsx scripts/seed.ts
