@@ -5,6 +5,8 @@
 //! helpers are unused in some binaries; panicking helpers are idiomatic here.
 #![allow(dead_code, clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
+pub mod flows;
+
 use auth_service::config::AppConfig;
 use auth_service::email::{EmailMessage, Mailer};
 use auth_service::jwt::{LocalSigner, Signer};
@@ -79,6 +81,11 @@ impl TestApp {
             emails,
             _container: container,
         }
+    }
+
+    /// Register an OIDC client for tests.
+    pub async fn seed_client(&self, client: &auth_service::domain::oauth::OidcClient) {
+        self.store.put_client(client).await.expect("seed client");
     }
 
     /// POST JSON with the same-origin headers the CSRF middleware requires.

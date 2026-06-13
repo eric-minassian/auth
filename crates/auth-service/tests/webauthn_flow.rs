@@ -6,96 +6,14 @@ mod harness;
 
 use axum::http::StatusCode;
 use harness::TestApp;
+use harness::flows::{login, new_authenticator, origin, signup_with_passkey};
 use serde_json::json;
-use url::Url;
-use webauthn_authenticator_rs::WebauthnAuthenticator;
-use webauthn_authenticator_rs::softpasskey::SoftPasskey;
 use webauthn_rs::prelude::{CreationChallengeResponse, RequestChallengeResponse};
-
-fn origin() -> Url {
-    Url::parse(harness::ISSUER).expect("origin url")
-}
-
-/// Drives signup → OTP → passkey registration. The enroll session is
-/// upgraded to full by register/finish, so the cookie jar ends with a full
-/// session and `authenticator` holds the credential.
-async fn signup_with_passkey(
-    app: &mut TestApp,
-    email: &str,
-    authenticator: &mut WebauthnAuthenticator<SoftPasskey>,
-) {
-    app.post("/api/signup/start", &json!({ "email": email }))
-        .await
-        .assert_status(StatusCode::OK);
-    let code = app.take_otp(email);
-    app.post(
-        "/api/signup/verify",
-        &json!({ "email": email, "code": code }),
-    )
-    .await
-    .assert_status(StatusCode::OK);
-
-    let res = app.post("/api/webauthn/register/start", &json!({})).await;
-    res.assert_status(StatusCode::OK);
-    let body: serde_json::Value = res.json();
-    let ceremony_id = body["ceremony_id"]
-        .as_str()
-        .expect("ceremony id")
-        .to_string();
-    let options: CreationChallengeResponse =
-        serde_json::from_value(body["options"].clone()).expect("creation options");
-
-    let credential = authenticator
-        .do_registration(origin(), options)
-        .expect("soft passkey registration");
-
-    let res = app
-        .post(
-            "/api/webauthn/register/finish",
-            &json!({
-                "ceremony_id": ceremony_id,
-                "credential": credential,
-                "name": "SoftPasskey",
-            }),
-        )
-        .await;
-    res.assert_status(StatusCode::OK);
-}
-
-async fn login(
-    app: &mut TestApp,
-    email: &str,
-    authenticator: &mut WebauthnAuthenticator<SoftPasskey>,
-) {
-    let res = app
-        .post("/api/webauthn/login/start", &json!({ "email": email }))
-        .await;
-    res.assert_status(StatusCode::OK);
-    let body: serde_json::Value = res.json();
-    let ceremony_id = body["ceremony_id"]
-        .as_str()
-        .expect("ceremony id")
-        .to_string();
-    let options: RequestChallengeResponse =
-        serde_json::from_value(body["options"].clone()).expect("request options");
-
-    let credential = authenticator
-        .do_authentication(origin(), options)
-        .expect("soft passkey authentication");
-
-    let res = app
-        .post(
-            "/api/webauthn/login/finish",
-            &json!({ "ceremony_id": ceremony_id, "credential": credential }),
-        )
-        .await;
-    res.assert_status(StatusCode::OK);
-}
 
 #[tokio::test]
 async fn register_upgrades_enroll_session_to_full() {
     let mut app = TestApp::spawn().await;
-    let mut authenticator = WebauthnAuthenticator::new(SoftPasskey::new(true));
+    let mut authenticator = new_authenticator();
 
     signup_with_passkey(&mut app, "pk@example.com", &mut authenticator).await;
 
@@ -115,7 +33,7 @@ async fn register_upgrades_enroll_session_to_full() {
 #[tokio::test]
 async fn full_login_roundtrip_with_fresh_session() {
     let mut app = TestApp::spawn().await;
-    let mut authenticator = WebauthnAuthenticator::new(SoftPasskey::new(true));
+    let mut authenticator = new_authenticator();
 
     signup_with_passkey(&mut app, "login@example.com", &mut authenticator).await;
 
@@ -145,7 +63,7 @@ async fn full_login_roundtrip_with_fresh_session() {
 #[tokio::test]
 async fn ceremony_is_single_use_and_login_is_uniform_on_garbage() {
     let mut app = TestApp::spawn().await;
-    let mut authenticator = WebauthnAuthenticator::new(SoftPasskey::new(true));
+    let mut authenticator = new_authenticator();
 
     signup_with_passkey(&mut app, "once@example.com", &mut authenticator).await;
     app.post("/api/session/logout", &json!({}))
@@ -187,7 +105,7 @@ async fn ceremony_is_single_use_and_login_is_uniform_on_garbage() {
 #[tokio::test]
 async fn last_passkey_cannot_be_deleted_and_second_one_can() {
     let mut app = TestApp::spawn().await;
-    let mut authenticator = WebauthnAuthenticator::new(SoftPasskey::new(true));
+    let mut authenticator = new_authenticator();
 
     signup_with_passkey(&mut app, "del@example.com", &mut authenticator).await;
 
@@ -208,7 +126,7 @@ async fn last_passkey_cannot_be_deleted_and_second_one_can() {
     res.assert_status(StatusCode::CONFLICT);
 
     // Register a second passkey (separate authenticator), then delete the first.
-    let mut second = WebauthnAuthenticator::new(SoftPasskey::new(true));
+    let mut second = new_authenticator();
     let res = app.post("/api/webauthn/register/start", &json!({})).await;
     let body: serde_json::Value = res.json();
     let ceremony_id = body["ceremony_id"].as_str().expect("id").to_string();

@@ -6,6 +6,7 @@ pub mod email;
 pub mod error;
 pub mod jwt;
 pub mod middleware;
+pub mod oidc;
 pub mod session;
 pub mod state;
 pub mod store;
@@ -56,6 +57,30 @@ pub fn build_router(state: AppState) -> Router {
     if state.cfg.dev_mode {
         router = router.route("/api/dev/last-otp", get(api::dev::last_otp));
     }
+
+    // OIDC endpoints. token/revoke/userinfo are browser-callable from RP
+    // origins (CORS allowlist from client registrations); they never read
+    // cookies, so the /api/* CSRF check doesn't apply to them.
+    let oauth = Router::new()
+        .route("/oauth/token", post(oidc::token::token))
+        .route("/oauth/revoke", post(oidc::revoke::revoke))
+        .route(
+            "/oauth/userinfo",
+            get(oidc::userinfo::userinfo).post(oidc::userinfo::userinfo),
+        )
+        .layer(axum_middleware::from_fn_with_state(
+            state.clone(),
+            oidc::cors::allow_registered_origins,
+        ));
+
+    router = router
+        .route(
+            "/.well-known/openid-configuration",
+            get(oidc::discovery::openid_configuration),
+        )
+        .route("/.well-known/jwks.json", get(oidc::jwks::jwks))
+        .route("/oauth/authorize", get(oidc::authorize::authorize))
+        .merge(oauth);
 
     router
         .layer(axum_middleware::from_fn_with_state(

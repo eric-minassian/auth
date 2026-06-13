@@ -66,6 +66,7 @@ utoipa-axum = "0.2"
 
 [dev-dependencies]
 axum-test = "20"
+p256 = { version = "0.13", features = ["ecdsa"] }
 proptest = "1"
 testcontainers = "0.27"
 testcontainers-modules = { version = "0.15", features = ["dynamodb"] }
