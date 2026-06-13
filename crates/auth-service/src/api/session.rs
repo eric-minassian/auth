@@ -1,7 +1,9 @@
 use axum::Json;
 use axum::extract::State;
 use axum_extra::extract::CookieJar;
+use serde::Serialize;
 use serde_json::{Value, json};
+use utoipa::ToSchema;
 
 use crate::error::ApiError;
 use crate::session::clear_session_cookie;
@@ -9,7 +11,35 @@ use crate::session::extract::{AnySession, FullSession};
 use crate::session::logout::revoke_session_cascade;
 use crate::state::AppState;
 
+#[derive(Serialize, ToSchema)]
+pub struct SessionUser {
+    pub user_id: String,
+    pub email: String,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct SessionMeta {
+    pub created_at: i64,
+    pub amr: Vec<String>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct SessionInfo {
+    pub user: SessionUser,
+    pub session: SessionMeta,
+}
+
 /// GET /api/session — whoami for the SPA.
+#[utoipa::path(
+    get,
+    path = "/api/session",
+    tag = "session",
+    responses(
+        (status = 200, body = SessionInfo, description = "Current user and session metadata"),
+        (status = 401, body = super::ErrorResponse, description = "No session"),
+        (status = 403, body = super::ErrorResponse, description = "Enroll-level session (passkey login required)"),
+    ),
+)]
 pub async fn get(
     State(state): State<AppState>,
     FullSession(session): FullSession,
@@ -34,6 +64,15 @@ pub async fn get(
 /// POST /api/session/logout — destroys the IdP session and cascades:
 /// revokes refresh families bound to it and dispatches back-channel logout
 /// to affected RPs.
+#[utoipa::path(
+    post,
+    path = "/api/session/logout",
+    tag = "session",
+    responses(
+        (status = 200, body = super::OkResponse, description = "Session destroyed, cookie cleared"),
+        (status = 401, body = super::ErrorResponse),
+    ),
+)]
 pub async fn logout(
     State(state): State<AppState>,
     AnySession(session): AnySession,

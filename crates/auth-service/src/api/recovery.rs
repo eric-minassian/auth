@@ -17,6 +17,16 @@ use crate::store::rate_limit::RateClass;
 
 /// POST /api/recovery/start — sends a recovery OTP if the account exists.
 /// Uniform 200 either way (anti-enumeration).
+#[utoipa::path(
+    post,
+    path = "/api/recovery/start",
+    tag = "recovery",
+    request_body = StartRequest,
+    responses(
+        (status = 200, body = super::OkResponse),
+        (status = 429, body = super::ErrorResponse, description = "Rate limited"),
+    ),
+)]
 pub async fn start(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -49,6 +59,16 @@ pub async fn start(
 
 /// POST /api/recovery/verify — consumes the OTP and issues an enroll-level
 /// session on the existing account so a new passkey can be registered.
+#[utoipa::path(
+    post,
+    path = "/api/recovery/verify",
+    tag = "recovery",
+    request_body = VerifyRequest,
+    responses(
+        (status = 200, body = VerifyResponse, description = "Enroll-level session cookie set"),
+        (status = 400, body = super::ErrorResponse, description = "Invalid or expired code"),
+    ),
+)]
 pub async fn verify(
     State(state): State<AppState>,
     headers: HeaderMap,

@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+use utoipa::ToSchema;
+
 use super::client_ip;
 use crate::domain::otp::OtpPurpose;
 use crate::domain::session::SessionLevel;
@@ -16,7 +18,7 @@ use crate::session::session_cookie;
 use crate::state::AppState;
 use crate::store::rate_limit::RateClass;
 
-#[derive(Debug, Deserialize, Validate)]
+#[derive(Debug, Deserialize, Validate, ToSchema)]
 pub struct StartRequest {
     #[garde(email)]
     pub email: String,
@@ -24,6 +26,16 @@ pub struct StartRequest {
 
 /// POST /api/signup/start — sends an OTP (or an "account exists" notice).
 /// Uniform 200 regardless of account existence (anti-enumeration).
+#[utoipa::path(
+    post,
+    path = "/api/signup/start",
+    tag = "signup",
+    request_body = StartRequest,
+    responses(
+        (status = 200, body = super::OkResponse, description = "OTP dispatched (uniform regardless of account existence)"),
+        (status = 429, body = super::ErrorResponse, description = "Rate limited"),
+    ),
+)]
 pub async fn start(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -58,7 +70,7 @@ pub async fn start(
     Ok(Json(json!({ "ok": true })))
 }
 
-#[derive(Debug, Deserialize, Validate)]
+#[derive(Debug, Deserialize, Validate, ToSchema)]
 pub struct VerifyRequest {
     #[garde(email)]
     pub email: String,
@@ -66,7 +78,7 @@ pub struct VerifyRequest {
     pub code: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct VerifyResponse {
     pub user_id: Uuid,
 }
@@ -74,6 +86,17 @@ pub struct VerifyResponse {
 /// POST /api/signup/verify — consumes the OTP, creates the account, and
 /// issues an enroll-level session whose only capability is registering the
 /// first passkey.
+#[utoipa::path(
+    post,
+    path = "/api/signup/verify",
+    tag = "signup",
+    request_body = VerifyRequest,
+    responses(
+        (status = 200, body = VerifyResponse, description = "Account created; enroll-level session cookie set"),
+        (status = 400, body = super::ErrorResponse, description = "Invalid or expired code"),
+        (status = 409, body = super::ErrorResponse, description = "Account already exists"),
+    ),
+)]
 pub async fn verify(
     State(state): State<AppState>,
     headers: HeaderMap,

@@ -22,6 +22,20 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
 
+  openapi-drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Check committed OpenAPI spec is up to date
+        run: |
+          cargo run --quiet --bin export-openapi > /tmp/openapi.json
+          if ! diff -u openapi/openapi.json /tmp/openapi.json; then
+            echo "::error::openapi/openapi.json is stale. Run 'pnpm generate' and commit."
+            exit 1
+          fi
+
   ts:
     runs-on: ubuntu-latest
     steps:

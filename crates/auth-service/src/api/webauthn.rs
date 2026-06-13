@@ -4,6 +4,7 @@ use axum::http::HeaderMap;
 use axum_extra::extract::CookieJar;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use utoipa::ToSchema;
 use webauthn_rs::prelude::{
     CreationChallengeResponse, DiscoverableAuthentication, PasskeyAuthentication,
     PasskeyRegistration, PublicKeyCredential, RegisterPublicKeyCredential,
@@ -27,6 +28,17 @@ pub struct RegisterStartResponse {
 }
 
 /// POST /api/webauthn/register/start — enroll or full session.
+///
+/// Returns `{ ceremony_id, options }` where `options` is the raw
+/// `PublicKeyCredentialCreationOptions` to pass to `navigator.credentials
+/// .create()`. The shape is the standard WebAuthn structure (not modeled in
+/// this schema).
+#[utoipa::path(
+    post,
+    path = "/api/webauthn/register/start",
+    tag = "webauthn",
+    responses((status = 200, description = "{ ceremony_id, options }"), (status = 401)),
+)]
 pub async fn register_start(
     State(state): State<AppState>,
     AnySession(session): AnySession,
@@ -64,15 +76,26 @@ pub async fn register_start(
     }))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct RegisterFinishRequest {
     pub ceremony_id: String,
+    /// Raw `navigator.credentials.create()` result (standard WebAuthn shape).
+    #[schema(value_type = Object)]
     pub credential: RegisterPublicKeyCredential,
     pub name: Option<String>,
 }
 
 /// POST /api/webauthn/register/finish — stores the passkey; upgrades an
 /// enroll session to full when it was the first registration step.
+///
+/// Body: `{ ceremony_id, credential, name? }` where `credential` is the
+/// `navigator.credentials.create()` result.
+#[utoipa::path(
+    post,
+    path = "/api/webauthn/register/finish",
+    tag = "webauthn",
+    responses((status = 200, description = "{ credential_id }"), (status = 400), (status = 403)),
+)]
 pub async fn register_finish(
     State(state): State<AppState>,
     AnySession(session): AnySession,
@@ -122,7 +145,7 @@ pub enum LoginCeremonyState {
     AllowList(PasskeyAuthentication),
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, ToSchema)]
 pub struct LoginStartRequest {
     #[serde(default)]
     pub email: Option<String>,
@@ -138,6 +161,15 @@ pub struct LoginStartResponse {
 /// the discoverable (conditional-UI) flow; with one, an allowCredentials
 /// challenge for that account. Unknown emails get a discoverable challenge
 /// so the response shape stays uniform.
+///
+/// Body: `{ email? }`. Returns `{ ceremony_id, options }` for
+/// `navigator.credentials.get()`.
+#[utoipa::path(
+    post,
+    path = "/api/webauthn/login/start",
+    tag = "webauthn",
+    responses((status = 200, description = "{ ceremony_id, options }")),
+)]
 pub async fn login_start(
     State(state): State<AppState>,
     body: Option<Json<LoginStartRequest>>,
@@ -185,9 +217,11 @@ pub async fn login_start(
     }))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct LoginFinishRequest {
     pub ceremony_id: String,
+    /// Raw `navigator.credentials.get()` result (standard WebAuthn shape).
+    #[schema(value_type = Object)]
     pub credential: PublicKeyCredential,
 }
 
@@ -198,6 +232,15 @@ pub struct LoginFinishResponse {
 
 /// POST /api/webauthn/login/finish — verifies the assertion and issues a
 /// full session.
+///
+/// Body: `{ ceremony_id, credential }` where `credential` is the
+/// `navigator.credentials.get()` result. Returns `{ user_id }`.
+#[utoipa::path(
+    post,
+    path = "/api/webauthn/login/finish",
+    tag = "webauthn",
+    responses((status = 200, description = "{ user_id }"), (status = 401, description = "Authentication failed")),
+)]
 pub async fn login_finish(
     State(state): State<AppState>,
     headers: HeaderMap,

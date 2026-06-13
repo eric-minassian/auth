@@ -18,7 +18,7 @@ use crate::store::now;
 use crate::store::oauth::{CodeConsume, RotateOutcome};
 use crate::store::rate_limit::RateClass;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct TokenRequest {
     pub grant_type: String,
     pub code: Option<String>,
@@ -28,10 +28,10 @@ pub struct TokenRequest {
     pub refresh_token: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct TokenResponse {
     pub access_token: String,
-    pub token_type: &'static str,
+    pub token_type: String,
     pub expires_in: i64,
     pub scope: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -42,6 +42,16 @@ pub struct TokenResponse {
 
 /// POST /oauth/token — authorization_code (with PKCE) and refresh_token
 /// grants for public clients.
+#[utoipa::path(
+    post,
+    path = "/oauth/token",
+    tag = "oidc",
+    request_body(content = TokenRequest, content_type = "application/x-www-form-urlencoded"),
+    responses(
+        (status = 200, body = TokenResponse),
+        (status = 400, description = "OAuth error (RFC 6749 §5.2)"),
+    ),
+)]
 pub async fn token(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -281,7 +291,7 @@ async fn mint(state: &AppState, input: MintInput<'_>) -> Result<TokenResponse, O
 
     Ok(TokenResponse {
         access_token,
-        token_type: "Bearer",
+        token_type: "Bearer".to_string(),
         expires_in: ACCESS_TOKEN_TTL_SECS,
         scope: input.scope.to_string(),
         id_token,

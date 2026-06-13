@@ -1,8 +1,9 @@
 use axum::Json;
 use axum::extract::{Path, State};
 use garde::Validate;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use utoipa::ToSchema;
 
 use crate::error::ApiError;
 use crate::session::extract::FullSession;
@@ -11,7 +12,40 @@ use crate::state::AppState;
 use crate::store::StoreError;
 use crate::store::rate_limit::RateClass;
 
+#[derive(Serialize, ToSchema)]
+pub struct PasskeyInfo {
+    pub credential_id: String,
+    pub name: String,
+    pub created_at: i64,
+    pub last_used_at: Option<i64>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct PasskeyList {
+    pub passkeys: Vec<PasskeyInfo>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct SessionListItem {
+    pub session_id: String,
+    pub created_at: i64,
+    pub last_seen_at: i64,
+    pub amr: Vec<String>,
+    pub current: bool,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct SessionList {
+    pub sessions: Vec<SessionListItem>,
+}
+
 /// GET /api/account/passkeys
+#[utoipa::path(
+    get,
+    path = "/api/account/passkeys",
+    tag = "account",
+    responses((status = 200, body = PasskeyList), (status = 403, body = super::ErrorResponse)),
+)]
 pub async fn list_passkeys(
     State(state): State<AppState>,
     FullSession(session): FullSession,
@@ -32,13 +66,21 @@ pub async fn list_passkeys(
     Ok(Json(json!({ "passkeys": passkeys })))
 }
 
-#[derive(Deserialize, Validate)]
+#[derive(Deserialize, Validate, ToSchema)]
 pub struct RenameRequest {
     #[garde(length(min = 1, max = 64))]
     pub name: String,
 }
 
 /// PATCH /api/account/passkeys/{credential_id}
+#[utoipa::path(
+    patch,
+    path = "/api/account/passkeys/{credential_id}",
+    tag = "account",
+    params(("credential_id" = String, Path, description = "base64url credential id")),
+    request_body = RenameRequest,
+    responses((status = 200, body = super::OkResponse), (status = 404, body = super::ErrorResponse)),
+)]
 pub async fn rename_passkey(
     State(state): State<AppState>,
     FullSession(session): FullSession,
@@ -60,6 +102,17 @@ pub async fn rename_passkey(
 
 /// DELETE /api/account/passkeys/{credential_id} — refuses to delete the last
 /// passkey (account lockout guard; recovery would be the only way back in).
+#[utoipa::path(
+    delete,
+    path = "/api/account/passkeys/{credential_id}",
+    tag = "account",
+    params(("credential_id" = String, Path, description = "base64url credential id")),
+    responses(
+        (status = 200, body = super::OkResponse),
+        (status = 404, body = super::ErrorResponse),
+        (status = 409, body = super::ErrorResponse, description = "Cannot delete the only passkey"),
+    ),
+)]
 pub async fn delete_passkey(
     State(state): State<AppState>,
     FullSession(session): FullSession,
@@ -91,6 +144,12 @@ pub async fn delete_passkey(
 }
 
 /// GET /api/account/sessions
+#[utoipa::path(
+    get,
+    path = "/api/account/sessions",
+    tag = "account",
+    responses((status = 200, body = SessionList), (status = 403, body = super::ErrorResponse)),
+)]
 pub async fn list_sessions(
     State(state): State<AppState>,
     FullSession(session): FullSession,
@@ -114,6 +173,13 @@ pub async fn list_sessions(
 
 /// DELETE /api/account/sessions/{session_id} — session_id is the sid hash as
 /// returned by the list endpoint (opaque to the client).
+#[utoipa::path(
+    delete,
+    path = "/api/account/sessions/{session_id}",
+    tag = "account",
+    params(("session_id" = String, Path, description = "Opaque session id from the list endpoint")),
+    responses((status = 200, body = super::OkResponse), (status = 404, body = super::ErrorResponse)),
+)]
 pub async fn revoke_session(
     State(state): State<AppState>,
     FullSession(session): FullSession,
@@ -132,6 +198,12 @@ pub async fn revoke_session(
 /// DELETE /api/account — permanently delete the account and everything bound
 /// to it: passkeys, sessions (each cascading to refresh families +
 /// back-channel logout), then the user record itself.
+#[utoipa::path(
+    delete,
+    path = "/api/account",
+    tag = "account",
+    responses((status = 200, body = super::OkResponse), (status = 401, body = super::ErrorResponse)),
+)]
 pub async fn delete_account(
     State(state): State<AppState>,
     FullSession(session): FullSession,

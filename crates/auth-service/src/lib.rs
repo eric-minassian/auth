@@ -7,6 +7,7 @@ pub mod error;
 pub mod jwt;
 pub mod middleware;
 pub mod oidc;
+pub mod openapi;
 pub mod session;
 pub mod state;
 pub mod store;
