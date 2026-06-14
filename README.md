@@ -12,7 +12,7 @@ Personal OIDC provider at **auth.ericminassian.com** — SSO for first-party app
 |---|---|
 | `crates/auth-service` | Rust service (axum). Bins: `bootstrap` (Lambda), `local` (dev server), `export-openapi` |
 | `apps/web` | React SPA (Vite, Tailwind v4, [@eric-minassian/design](https://github.com/eric-minassian/design)) — login/signup/account UI |
-| `packages/auth-sdk` | `@eric-minassian/auth` — TypeScript SDK (`/client`, `/react`, `/server`) |
+| `packages/auth-sdk` | `@ericminassian/auth` — TypeScript SDK (`/client`, `/react`, `/server`) |
 | `infra` | AWS CDK (TypeScript), us-east-1 |
 | `openapi/openapi.json` | Generated API contract (utoipa) — committed, CI checks drift |
 | `config/clients.json` | OIDC client registry, seeded to DynamoDB |

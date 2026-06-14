@@ -1,5 +1,5 @@
 ---
-"@eric-minassian/auth": minor
+"@ericminassian/auth": minor
 ---
 
 Initial release: OIDC browser client (`/client`), React bindings (`/react`),

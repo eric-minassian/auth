@@ -1,7 +1,7 @@
 # Changesets
 
 This folder holds [changesets](https://github.com/changesets/changesets) for
-the published package (`@eric-minassian/auth`). To record a change, run:
+the published package (`@ericminassian/auth`). To record a change, run:
 
 ```sh
 pnpm changeset

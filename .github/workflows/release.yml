@@ -28,10 +28,10 @@ jobs:
           node-version-file: .nvmrc
       - run: corepack enable
       - run: pnpm install --frozen-lockfile
-      - run: pnpm --filter @eric-minassian/auth build
+      - run: pnpm --filter @ericminassian/auth build
       - name: Create Release PR or publish
         uses: changesets/action@v1
         with:
-          publish: pnpm --filter @eric-minassian/auth publish --access public --no-git-checks
+          publish: pnpm --filter @ericminassian/auth publish --access public --no-git-checks
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,5 +1,5 @@
 /**
- * Shared surface for `@eric-minassian/auth`: error type, public user shape,
+ * Shared surface for `@ericminassian/auth`: error type, public user shape,
  * and the default issuer. Import the client, react, or server entry points
  * for actual functionality.
  */
