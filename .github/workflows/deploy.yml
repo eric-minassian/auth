@@ -30,7 +30,7 @@ jobs:
     env:
       AWS_REGION: us-east-1
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -39,11 +39,14 @@ jobs:
       - name: Install cargo-lambda
         run: pip install cargo-lambda
 
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      # Enable pnpm via corepack: it reads the pinned version from package.json's
+      # packageManager field and runs on the setup-node Node (pnpm 11.x needs Node
+      # >=22.13). corepack uses pnpm's default store path; pnpm/action-setup nests
+      # the store under node_modules, breaking the design dep's d.ts build (TS2883).
+      - uses: actions/setup-node@v6
         with:
           node-version-file: .nvmrc
-          cache: pnpm
+      - run: corepack enable
       - run: pnpm install --frozen-lockfile
 
       - name: Build Rust Lambda (ARM64)
@@ -51,7 +54,7 @@ jobs:
       - name: Build SPA
         run: pnpm --filter web build
 
-      - uses: aws-actions/configure-aws-credentials@v4
+      - uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
