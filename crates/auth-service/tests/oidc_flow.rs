@@ -386,3 +386,43 @@ async fn cors_reflects_only_registered_origins() {
         .await;
     assert!(res.maybe_header("access-control-allow-origin").is_none());
 }
+
+#[tokio::test]
+async fn metadata_endpoints_allow_any_origin() {
+    // Discovery + JWKS are public metadata, fetched cross-origin by RP SPAs
+    // before they are known to us, so any origin may read them.
+    let app = TestApp::spawn().await;
+
+    for path in [
+        "/.well-known/openid-configuration",
+        "/.well-known/jwks.json",
+    ] {
+        let res = app
+            .server
+            .get(path)
+            .add_header("origin", "http://unregistered.example.com")
+            .await;
+        res.assert_status(StatusCode::OK);
+        assert_eq!(
+            res.header("access-control-allow-origin").to_str().ok(),
+            Some("*"),
+            "{path} should be readable from any origin"
+        );
+
+        let preflight = app
+            .server
+            .method(axum::http::Method::OPTIONS, path)
+            .add_header("origin", "http://unregistered.example.com")
+            .add_header("access-control-request-method", "GET")
+            .await;
+        preflight.assert_status(StatusCode::NO_CONTENT);
+        assert_eq!(
+            preflight
+                .header("access-control-allow-origin")
+                .to_str()
+                .ok(),
+            Some("*"),
+            "{path} preflight should allow any origin"
+        );
+    }
+}

@@ -75,14 +75,21 @@ pub fn build_router(state: AppState) -> Router {
             oidc::cors::allow_registered_origins,
         ));
 
-    router = router
+    // Public OIDC metadata. RP SPAs fetch discovery (then JWKS) cross-origin
+    // before anything else; these expose no secrets and read no cookies, so any
+    // origin may read them (`Access-Control-Allow-Origin: *`).
+    let metadata = Router::new()
         .route(
             "/.well-known/openid-configuration",
             get(oidc::discovery::openid_configuration),
         )
         .route("/.well-known/jwks.json", get(oidc::jwks::jwks))
+        .layer(axum_middleware::from_fn(oidc::cors::allow_public));
+
+    router = router
         .route("/oauth/authorize", get(oidc::authorize::authorize))
         .route("/oauth/logout", get(oidc::logout::logout))
+        .merge(metadata)
         .merge(oauth);
 
     router
