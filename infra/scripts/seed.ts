@@ -59,7 +59,12 @@ async function main(): Promise<void> {
           client_name: client.client_name,
           redirect_uris: client.redirect_uris,
           post_logout_redirect_uris: client.post_logout_redirect_uris ?? [],
-          backchannel_logout_uri: client.backchannel_logout_uri,
+          // Optional: SPAs without a server (e.g. the static website client)
+          // have no back-channel receiver. Omit rather than write `undefined`,
+          // which the DynamoDB document client rejects.
+          ...(client.backchannel_logout_uri
+            ? { backchannel_logout_uri: client.backchannel_logout_uri }
+            : {}),
           allowed_origins: client.allowed_origins ?? [],
           scopes: client.scopes,
         },
