@@ -2,14 +2,18 @@ import * as cdk from "aws-cdk-lib";
 import { Match, Template } from "aws-cdk-lib/assertions";
 import { describe, expect, it } from "vitest";
 
+import { getConfig } from "../config/environments.js";
 import type { AuthConfig } from "../config/types.js";
 import { AuthAppStack } from "../lib/stacks/app-stack.js";
+import { AuthCiRoleStack } from "../lib/stacks/ci-role-stack.js";
 import { AuthStatefulStack } from "../lib/stacks/stateful-stack.js";
 
 const config: AuthConfig = {
+  name: "prod",
   env: { account: "123456789012", region: "us-east-1" },
   domain: "ericminassian.com",
   subdomain: "auth",
+  delegation: { managementAccountId: "298499393596", parentZoneName: "ericminassian.com" },
   lambdaAssetPath: "assets/lambda-bootstrap",
   spaAssetPath: "assets/spa-placeholder",
 };
@@ -35,6 +39,15 @@ describe("AuthStateful", () => {
   it("creates the delegated subdomain hosted zone", () => {
     stateful.hasResourceProperties("AWS::Route53::HostedZone", {
       Name: "auth.ericminassian.com.",
+    });
+  });
+
+  it("registers cross-account NS delegation via the org-management role", () => {
+    // The role name derives from the full host, and must match the org repo's
+    // route53-delegation-<host> role (see config/types.ts delegationRoleArn).
+    stateful.hasResourceProperties("Custom::CrossAccountZoneDelegation", {
+      AssumeRoleArn: "arn:aws:iam::298499393596:role/route53-delegation-auth-ericminassian-com",
+      ParentZoneName: "ericminassian.com",
     });
   });
 
@@ -117,6 +130,54 @@ describe("AuthApp", () => {
           }),
         }),
       }),
+    });
+  });
+});
+
+describe("AuthCiRole", () => {
+  const ciRole = Template.fromStack(
+    new AuthCiRoleStack(new cdk.App(), "AuthCiRole", getConfig("prod"), {
+      env: getConfig("prod").env,
+    }),
+  );
+
+  it("registers the GitHub Actions OIDC provider", () => {
+    ciRole.hasResourceProperties("Custom::AWSCDKOpenIdConnectProvider", {
+      Url: "https://token.actions.githubusercontent.com",
+      ClientIDList: ["sts.amazonaws.com"],
+    });
+  });
+
+  it("trusts only this repo's runs against the matching GitHub Environment", () => {
+    ciRole.hasResourceProperties("AWS::IAM::Role", {
+      RoleName: "auth-github-deploy-prod",
+      AssumeRolePolicyDocument: Match.objectLike({
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Action: "sts:AssumeRoleWithWebIdentity",
+            Condition: {
+              StringEquals: { "token.actions.githubusercontent.com:aud": "sts.amazonaws.com" },
+              StringLike: {
+                "token.actions.githubusercontent.com:sub":
+                  "repo:eric-minassian/auth:environment:prod",
+              },
+            },
+          }),
+        ]),
+      }),
+    });
+  });
+
+  it("can only assume the CDK bootstrap roles to deploy", () => {
+    ciRole.hasResourceProperties("AWS::IAM::Policy", {
+      PolicyDocument: {
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Action: "sts:AssumeRole",
+            Resource: "arn:aws:iam::399827112494:role/cdk-hnb659fds-*-399827112494-us-east-1",
+          }),
+        ]),
+      },
     });
   });
 });

@@ -21,4 +21,4 @@ Personal OIDC provider at auth.ericminassian.com. Full plan & rationale: `docs/r
 - `cargo test` needs Docker (testcontainers DynamoDB Local).
 - After changing any HTTP handler/schema: `pnpm generate` (re-exports openapi.json + SDK types); CI fails on drift.
 - Local stack: `pnpm dev`, browse `http://auth.localhost:5173`.
-- CDK code follows the `cdk` skill conventions; deploys are manual (`deploy.yml` workflow_dispatch) — never auto-deploy.
+- CDK is multi-account, env selected via `cdk --context env=<local|prod>` (`infra/config/environments.ts`). **Prod auto-deploys on merge to main** (`deploy.yml`: checks → build → `cdk deploy --context env=prod`). **local** deploys are manual into a dev's own account. CI→AWS auth is GitHub OIDC (`AuthCiRoleStack`, deployed once per account out-of-band). DNS subdomains self-delegate cross-account from the `~/projects/aws` org repo. CDK code follows the `cdk` skill conventions. Full topology + one-time bring-up: `docs/deploy.md`.
