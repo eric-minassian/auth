@@ -61,6 +61,39 @@ pub async fn allow_registered_origins(
     response
 }
 
+/// CORS for the public OIDC metadata endpoints (discovery, JWKS). These expose
+/// no secrets and read no cookies, so any origin may fetch them — the
+/// `Access-Control-Allow-Origin: *` that public IdPs serve. RP SPAs hit
+/// discovery before they are otherwise known to us, so the per-client allowlist
+/// (see [`allow_registered_origins`]) can't gate it; that allowlist is reserved
+/// for the credential-adjacent token/revoke/userinfo endpoints.
+pub async fn allow_public(req: Request, next: Next) -> Response {
+    if req.method() == Method::OPTIONS {
+        let mut response = StatusCode::NO_CONTENT.into_response();
+        let headers = response.headers_mut();
+        headers.insert(
+            header::ACCESS_CONTROL_ALLOW_ORIGIN,
+            HeaderValue::from_static("*"),
+        );
+        headers.insert(
+            header::ACCESS_CONTROL_ALLOW_METHODS,
+            HeaderValue::from_static("GET, OPTIONS"),
+        );
+        headers.insert(
+            header::ACCESS_CONTROL_MAX_AGE,
+            HeaderValue::from_static("600"),
+        );
+        return response;
+    }
+
+    let mut response = next.run(req).await;
+    response.headers_mut().insert(
+        header::ACCESS_CONTROL_ALLOW_ORIGIN,
+        HeaderValue::from_static("*"),
+    );
+    response
+}
+
 fn apply_cors(response: &mut Response, origin: Option<&str>) {
     let Some(origin) = origin else { return };
     let Ok(value) = HeaderValue::from_str(origin) else {
