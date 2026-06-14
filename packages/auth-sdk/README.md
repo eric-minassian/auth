@@ -1,11 +1,11 @@
-# @eric-minassian/auth
+# @ericminassian/auth
 
 TypeScript SDK for [auth.ericminassian.com](https://auth.ericminassian.com) — the
 OIDC provider for `*.ericminassian.com` apps. ESM-only; subpath exports keep the
 browser and server surfaces separate.
 
 ```sh
-pnpm add @eric-minassian/auth
+pnpm add @ericminassian/auth
 ```
 
 ## Browser (`/client`, `/react`)
@@ -13,7 +13,7 @@ pnpm add @eric-minassian/auth
 Authorization code + PKCE, run entirely in the browser:
 
 ```ts
-import { createAuthClient } from "@eric-minassian/auth/client";
+import { createAuthClient } from "@ericminassian/auth/client";
 
 const auth = createAuthClient({
   clientId: "my-app",
@@ -33,8 +33,8 @@ const token = await auth.getAccessToken();
 React bindings:
 
 ```tsx
-import { createAuthClient } from "@eric-minassian/auth/client";
-import { AuthProvider, useAuth, useUser } from "@eric-minassian/auth/react";
+import { createAuthClient } from "@ericminassian/auth/client";
+import { AuthProvider, useAuth, useUser } from "@ericminassian/auth/react";
 
 const client = createAuthClient({ clientId: "my-app", redirectUri: "…/callback" });
 
@@ -59,7 +59,7 @@ function Profile() {
 Verify access tokens locally against the JWKS (no network call per request, edge-safe):
 
 ```ts
-import { createAuthVerifier } from "@eric-minassian/auth/server";
+import { createAuthVerifier } from "@ericminassian/auth/server";
 
 const verifier = createAuthVerifier({ audience: "my-app" });
 
@@ -72,10 +72,10 @@ if (result.authenticated) {
 Framework middleware:
 
 ```ts
-import { authMiddleware } from "@eric-minassian/auth/server/hono";
+import { authMiddleware } from "@ericminassian/auth/server/hono";
 app.use("/api/*", authMiddleware(verifier)); // claims at c.var.auth
 
-import { requireAuth } from "@eric-minassian/auth/server/express";
+import { requireAuth } from "@ericminassian/auth/server/express";
 app.use("/api", requireAuth(verifier)); // claims at req.auth
 ```
 
