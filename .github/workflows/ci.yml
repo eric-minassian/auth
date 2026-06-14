@@ -1,9 +1,11 @@
 name: CI
 
+# Runs on every PR, and is invoked by the deploy pipeline (deploy.yml) as the
+# gate before anything is deployed. Pushes to main flow through that pipeline,
+# so there is no standalone push trigger here (avoids a duplicate run).
 on:
-  push:
-    branches: [main]
   pull_request:
+  workflow_call:
 
 concurrency:
   group: ci-${{ github.ref }}

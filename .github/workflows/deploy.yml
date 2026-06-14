@@ -1,26 +1,32 @@
 name: Deploy
 
-# Manual only — never auto-deploy.
+# Push/merge to main -> run all checks (reuses ci.yml, incl. the local e2e
+# suite) -> build the Rust Lambda + SPA -> deploy to prod. workflow_dispatch
+# re-runs it manually. The CI deploy role (AuthCiRole) is NOT deployed here — it
+# must pre-exist, since this job assumes it. See docs/deploy.md.
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
-    inputs:
-      stacks:
-        description: "Which stacks to deploy"
-        type: choice
-        default: "AuthApp"
-        options: ["AuthApp", "AuthStateful", "--all"]
 
 concurrency:
   group: deploy
   cancel-in-progress: false
 
 permissions:
-  id-token: write
   contents: read
 
 jobs:
+  checks:
+    uses: ./.github/workflows/ci.yml
+
   deploy:
+    needs: checks
     runs-on: ubuntu-latest
+    environment: prod
+    permissions:
+      id-token: write
+      contents: read
     env:
       AWS_REGION: us-east-1
     steps:
@@ -45,21 +51,20 @@ jobs:
       - name: Build SPA
         run: pnpm --filter web build
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+      - uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: CDK deploy
+      - name: CDK deploy (prod)
         working-directory: infra
         env:
-          # CDK reads these to locate the built artifacts (see config/prod.ts).
+          # CDK reads these to locate the built artifacts (see config/environments.ts).
           LAMBDA_DIST: ../target/lambda/auth-service
           SPA_DIST: ../apps/web/dist
-        run: pnpm exec cdk deploy ${{ inputs.stacks }} --require-approval never
+        run: pnpm exec cdk deploy --context env=prod AuthStateful AuthApp --require-approval never
 
       - name: Seed OIDC clients
-        if: inputs.stacks != 'AuthStateful'
         working-directory: infra
+        # configure-aws-credentials exports AWS_REGION for seed.ts.
         run: pnpm exec tsx scripts/seed.ts
