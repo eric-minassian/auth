@@ -32,6 +32,11 @@ jobs:
       - name: Create Release PR or publish
         uses: changesets/action@v1
         with:
-          publish: pnpm --filter @ericminassian/auth publish --access public --no-git-checks
+          # changeset publish runs `pnpm publish` (changesets detects the package
+          # manager), which authenticates to npm via OIDC trusted publishing on
+          # pnpm >=11.1.3 — no token, with provenance. It's idempotent (skips
+          # already-published versions) and lets the action create GitHub Releases.
+          # The id-token: write permission below enables the OIDC token exchange.
+          publish: pnpm exec changeset publish
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
