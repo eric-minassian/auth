@@ -9,6 +9,23 @@
       "backchannel_logout_uri": "https://demo.ericminassian.com/auth/backchannel-logout",
       "allowed_origins": ["https://demo.ericminassian.com"],
       "scopes": ["openid", "email", "offline_access"]
+    },
+    {
+      "client_id": "website",
+      "client_name": "ericminassian.com",
+      "redirect_uris": [
+        "https://www.ericminassian.com/auth/callback",
+        "http://localhost:4321/auth/callback"
+      ],
+      "post_logout_redirect_uris": [
+        "https://www.ericminassian.com/",
+        "http://localhost:4321/"
+      ],
+      "allowed_origins": [
+        "https://www.ericminassian.com",
+        "http://localhost:4321"
+      ],
+      "scopes": ["openid", "email", "offline_access"]
     }
   ]
 }
