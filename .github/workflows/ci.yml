@@ -15,7 +15,7 @@ jobs:
   rust:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -27,7 +27,7 @@ jobs:
   openapi-drift:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Check committed OpenAPI spec is up to date
@@ -41,12 +41,16 @@ jobs:
   ts:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      # Enable pnpm via corepack: it reads the pinned version from package.json's
+      # packageManager field and runs on the setup-node Node (pnpm 11.x needs Node
+      # >=22.13). corepack uses pnpm's default store path; pnpm/action-setup nests
+      # the store under node_modules, which breaks the @eric-minassian/design
+      # github dep's declaration build with TS2883 ("type is not portable").
+      - uses: actions/setup-node@v6
         with:
           node-version-file: .nvmrc
-          cache: pnpm
+      - run: corepack enable
       - run: pnpm install --frozen-lockfile
       - name: Check SDK wire types match the spec
         run: |
@@ -62,14 +66,14 @@ jobs:
   e2e:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      # See the ts job for why pnpm is enabled via corepack rather than action-setup.
+      - uses: actions/setup-node@v6
         with:
           node-version-file: .nvmrc
-          cache: pnpm
+      - run: corepack enable
       - run: pnpm install --frozen-lockfile
       - run: cargo build --bin local
       - name: Install Playwright Chromium

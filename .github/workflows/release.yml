@@ -18,12 +18,15 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      # Enable pnpm via corepack: reads the pinned version from package.json's
+      # packageManager field and runs on the setup-node Node (pnpm 11.x needs Node
+      # >=22.13). corepack uses pnpm's default store path; pnpm/action-setup nests
+      # the store under node_modules, breaking the design dep's d.ts build (TS2883).
+      - uses: actions/setup-node@v6
         with:
           node-version-file: .nvmrc
-          cache: pnpm
+      - run: corepack enable
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @eric-minassian/auth build
       - name: Create Release PR or publish
