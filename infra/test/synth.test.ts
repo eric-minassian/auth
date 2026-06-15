@@ -114,6 +114,21 @@ describe("AuthApp", () => {
     });
   });
 
+  it("invalidates the OIDC metadata cache on deploy", () => {
+    // A Lambda-only deploy must bust the edge cache for /.well-known/*, or
+    // discovery/JWKS serve stale responses for up to max-age (1h).
+    app.hasResourceProperties("AWS::IAM::Policy", {
+      PolicyDocument: {
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Action: "cloudfront:CreateInvalidation",
+            Effect: "Allow",
+          }),
+        ]),
+      },
+    });
+  });
+
   it("throttles the HTTP API default stage", () => {
     app.hasResourceProperties("AWS::ApiGatewayV2::Stage", {
       DefaultRouteSettings: { ThrottlingRateLimit: 25, ThrottlingBurstLimit: 50 },

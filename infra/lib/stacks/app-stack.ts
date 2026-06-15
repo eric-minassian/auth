@@ -18,6 +18,7 @@ import * as s3 from "aws-cdk-lib/aws-s3";
 import * as s3deploy from "aws-cdk-lib/aws-s3-deployment";
 import * as ses from "aws-cdk-lib/aws-ses";
 import * as sns from "aws-cdk-lib/aws-sns";
+import * as cr from "aws-cdk-lib/custom-resources";
 import type { Construct } from "constructs";
 
 import {
@@ -45,6 +46,7 @@ export class AuthAppStack extends cdk.Stack {
   constructor(scope: Construct, id: string, config: AuthConfig, props: AuthAppStackProps) {
     super(scope, id, props);
     const host = authHost(config);
+    const lambdaAssetPath = path.join(dir, "../..", config.lambdaAssetPath);
 
     // --- TLS certificate (us-east-1, DNS-validated in our zone) ---
     const certificate = new acm.Certificate(this, "Certificate", {
@@ -71,7 +73,7 @@ export class AuthAppStack extends cdk.Stack {
     const fn = new lambda.Function(this, "Api", {
       runtime: lambda.Runtime.PROVIDED_AL2023,
       handler: "bootstrap",
-      code: lambda.Code.fromAsset(path.join(dir, "../..", config.lambdaAssetPath)),
+      code: lambda.Code.fromAsset(lambdaAssetPath),
       architecture: lambda.Architecture.ARM_64,
       memorySize: 256,
       timeout: cdk.Duration.seconds(10),
@@ -244,6 +246,38 @@ export class AuthAppStack extends cdk.Stack {
       destinationBucket: spaBucket,
       distribution,
       distributionPaths: ["/*"],
+    });
+
+    // Bust the edge cache for the OIDC metadata whenever the Lambda changes.
+    // /.well-known/* is cached per the origin's Cache-Control (max-age=3600),
+    // and a Lambda-only deploy triggers no other invalidation (the SPA
+    // BucketDeployment above only invalidates when the SPA asset changes). So
+    // discovery / JWKS could otherwise serve a stale response — e.g. missing
+    // CORS headers — for up to an hour after a deploy. Keyed on the Lambda
+    // asset hash so it re-runs exactly when those responses can change.
+    const lambdaHash = cdk.FileSystem.fingerprint(lambdaAssetPath);
+    new cr.AwsCustomResource(this, "WellKnownCacheInvalidation", {
+      onUpdate: {
+        service: "CloudFront",
+        action: "createInvalidation",
+        parameters: {
+          DistributionId: distribution.distributionId,
+          InvalidationBatch: {
+            CallerReference: lambdaHash,
+            Paths: { Quantity: 1, Items: ["/.well-known/*"] },
+          },
+        },
+        physicalResourceId: cr.PhysicalResourceId.of(`wellknown-${lambdaHash}`),
+      },
+      installLatestAwsSdk: false,
+      policy: cr.AwsCustomResourcePolicy.fromStatements([
+        new iam.PolicyStatement({
+          actions: ["cloudfront:CreateInvalidation"],
+          resources: [
+            `arn:aws:cloudfront::${this.account}:distribution/${distribution.distributionId}`,
+          ],
+        }),
+      ]),
     });
 
     // --- DNS: point the zone apex at CloudFront ---
