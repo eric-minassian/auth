@@ -25,8 +25,24 @@ export interface SignInOptions {
 export interface AuthClient {
   /** Build a PKCE+state transaction and navigate to the authorize endpoint. */
   signInWithRedirect(options?: SignInOptions): Promise<void>;
+  /**
+   * Attempt silent SSO via a hidden iframe (`prompt=none`). Resolves to the
+   * resulting state — authenticated if an IdP session already existed,
+   * otherwise unchanged. Never rejects on `login_required`.
+   *
+   * Same-site only: the IdP session cookie is not sent to a cross-site iframe,
+   * so this is a no-op when the app and issuer aren't on the same site (e.g.
+   * `localhost` against a hosted issuer).
+   */
+  signInSilently(): Promise<AuthState>;
   /** Complete the redirect: exchange the code for tokens. Returns the saved returnTo. */
   handleRedirectCallback(url?: string): Promise<{ returnTo: string | undefined }>;
+  /**
+   * Call from the redirect callback page. Inside a silent-auth iframe it relays
+   * the result to the opener and resolves `null` (the page should do nothing
+   * else). At top level it completes the code exchange and returns `returnTo`.
+   */
+  handleCallback(): Promise<{ returnTo: string | undefined } | null>;
   /** A valid access token, refreshing if necessary. Throws `login_required` if not signed in. */
   getAccessToken(options?: { forceRefresh?: boolean }): Promise<string>;
   getUser(): User | undefined;
@@ -59,6 +75,9 @@ const RT_KEY = "ema_auth_rt";
 const ID_KEY = "ema_auth_id";
 // Refresh this many seconds before the access token actually expires.
 const EXPIRY_SKEW_SECONDS = 30;
+// postMessage discriminator + budget for the hidden silent-auth iframe.
+const SILENT_MESSAGE_SOURCE = "ema_auth_silent";
+const SILENT_TIMEOUT_MS = 8000;
 
 export function createAuthClient(options: AuthClientOptions): AuthClient {
   const issuer = (options.issuer ?? DEFAULT_ISSUER).replace(/\/$/, "");
@@ -120,51 +139,138 @@ export function createAuthClient(options: AuthClientOptions): AuthClient {
     }
   }
 
+  async function buildAuthorizeUrl(
+    extra: Record<string, string>,
+    returnTo?: string,
+  ): Promise<string> {
+    const { authorization_endpoint } = await getDiscovery();
+    const pkce = await createPkcePair();
+    const tx: Transaction = { verifier: pkce.verifier, state: createState() };
+    if (returnTo !== undefined) tx.returnTo = returnTo;
+    storage.set(TX_KEY, JSON.stringify(tx));
+    const url = new URL(authorization_endpoint);
+    url.search = new URLSearchParams({
+      response_type: "code",
+      client_id: options.clientId,
+      redirect_uri: options.redirectUri,
+      scope,
+      state: tx.state,
+      code_challenge: pkce.challenge,
+      code_challenge_method: "S256",
+      ...extra,
+    }).toString();
+    return url.toString();
+  }
+
+  async function completeCallback(
+    url?: string,
+  ): Promise<{ returnTo: string | undefined }> {
+    const params = new URL(url ?? currentUrl()).searchParams;
+    const raw = storage.get(TX_KEY);
+    storage.remove(TX_KEY);
+    if (!raw) {
+      throw new AuthError("state_mismatch", "no authorization transaction in progress");
+    }
+    const tx = JSON.parse(raw) as Transaction;
+    if (params.get("error")) {
+      throw new AuthError(
+        "invalid_grant",
+        params.get("error_description") ?? params.get("error") ?? "authorization failed",
+      );
+    }
+    if (params.get("state") !== tx.state) {
+      throw new AuthError("state_mismatch", "state parameter mismatch");
+    }
+    const code = params.get("code");
+    if (!code) throw new AuthError("invalid_grant", "missing authorization code");
+    await exchange({
+      grant_type: "authorization_code",
+      code,
+      redirect_uri: options.redirectUri,
+      client_id: options.clientId,
+      code_verifier: tx.verifier,
+    });
+    return { returnTo: tx.returnTo };
+  }
+
+  // Drive a hidden iframe through `prompt=none` authorize. The callback page,
+  // detecting it's framed, posts its query string back (see `handleCallback`).
+  // Resolves the relayed search string, or `undefined` on timeout.
+  function runSilentFrame(authorizeUrl: string): Promise<string | undefined> {
+    return new Promise((resolve) => {
+      const iframe = document.createElement("iframe");
+      iframe.style.display = "none";
+      iframe.setAttribute("aria-hidden", "true");
+      let settled = false;
+      const finish = (result: string | undefined): void => {
+        if (settled) return;
+        settled = true;
+        window.removeEventListener("message", onMessage);
+        clearTimeout(timer);
+        iframe.remove();
+        resolve(result);
+      };
+      const onMessage = (event: MessageEvent): void => {
+        if (event.origin !== window.location.origin) return;
+        const data = event.data as { source?: unknown; search?: unknown } | null;
+        if (!data || data.source !== SILENT_MESSAGE_SOURCE) return;
+        finish(typeof data.search === "string" ? data.search : "");
+      };
+      const timer = setTimeout(() => finish(undefined), SILENT_TIMEOUT_MS);
+      window.addEventListener("message", onMessage);
+      iframe.src = authorizeUrl;
+      document.body.appendChild(iframe);
+    });
+  }
+
   return {
     async signInWithRedirect(signInOptions): Promise<void> {
-      const { authorization_endpoint } = await getDiscovery();
-      const pkce = await createPkcePair();
-      const tx: Transaction = {
-        verifier: pkce.verifier,
-        state: createState(),
-        returnTo: signInOptions?.returnTo ?? currentUrl(),
-      };
-      storage.set(TX_KEY, JSON.stringify(tx));
-      const url = new URL(authorization_endpoint);
-      url.search = new URLSearchParams({
-        response_type: "code",
-        client_id: options.clientId,
-        redirect_uri: options.redirectUri,
-        scope,
-        state: tx.state,
-        code_challenge: pkce.challenge,
-        code_challenge_method: "S256",
-      }).toString();
-      redirect(url.toString());
+      const url = await buildAuthorizeUrl({}, signInOptions?.returnTo ?? currentUrl());
+      redirect(url);
+    },
+
+    async signInSilently(): Promise<AuthState> {
+      if (state.status === "authenticated") return state;
+      if (typeof window === "undefined" || typeof document === "undefined") {
+        return state;
+      }
+      let authorizeUrl: string;
+      try {
+        authorizeUrl = await buildAuthorizeUrl({ prompt: "none" });
+      } catch {
+        return state; // discovery failed; leave state untouched
+      }
+      const search = await runSilentFrame(authorizeUrl);
+      if (search === undefined) {
+        storage.remove(TX_KEY); // timed out; drop the dangling transaction
+        return state;
+      }
+      const callbackUrl = new URL(options.redirectUri);
+      callbackUrl.search = search;
+      try {
+        await completeCallback(callbackUrl.toString());
+      } catch {
+        // login_required (no IdP session) or any silent failure: stay
+        // unauthenticated, no UI disruption.
+      }
+      return state;
     },
 
     async handleRedirectCallback(url): Promise<{ returnTo: string | undefined }> {
-      const params = new URL(url ?? currentUrl()).searchParams;
-      const raw = storage.get(TX_KEY);
-      storage.remove(TX_KEY);
-      if (!raw) throw new AuthError("state_mismatch", "no authorization transaction in progress");
-      const tx = JSON.parse(raw) as Transaction;
-      if (params.get("error")) {
-        throw new AuthError("invalid_grant", params.get("error_description") ?? params.get("error") ?? "authorization failed");
+      return completeCallback(url);
+    },
+
+    async handleCallback(): Promise<{ returnTo: string | undefined } | null> {
+      if (isFramed()) {
+        // Silent-auth iframe: hand the result to the opener and stop. The
+        // parent (same origin) owns the transaction and does the exchange.
+        window.parent.postMessage(
+          { source: SILENT_MESSAGE_SOURCE, search: window.location.search },
+          window.location.origin,
+        );
+        return null;
       }
-      if (params.get("state") !== tx.state) {
-        throw new AuthError("state_mismatch", "state parameter mismatch");
-      }
-      const code = params.get("code");
-      if (!code) throw new AuthError("invalid_grant", "missing authorization code");
-      await exchange({
-        grant_type: "authorization_code",
-        code,
-        redirect_uri: options.redirectUri,
-        client_id: options.clientId,
-        code_verifier: tx.verifier,
-      });
-      return { returnTo: tx.returnTo };
+      return completeCallback();
     },
 
     async getAccessToken(getOptions): Promise<string> {
@@ -276,6 +382,16 @@ async function fetchJson<T>(url: string): Promise<T> {
 
 function currentUrl(): string {
   return typeof location !== "undefined" ? location.href : "";
+}
+
+function isFramed(): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    return window.self !== window.top;
+  } catch {
+    // Cross-origin parent throws on access — which means we are framed.
+    return true;
+  }
 }
 
 function redirect(url: string): void {
