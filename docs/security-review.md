@@ -41,8 +41,16 @@ below.
   mail send off the response path if it ever matters.
 - **Refresh token in `sessionStorage` is XSS-exfiltratable.** Inherent to the
   browser-only SPA model the SDK implements; mitigated with sessionStorage (not
-  localStorage), memory-only access tokens, and rotation + reuse detection. A
-  BFF with an HttpOnly cookie is the stronger pattern if warranted later
-  (documented in `docs/research/sso-patterns.md`).
+  localStorage), memory-only access tokens, and rotation + reuse detection.
+  **Now substantially mitigated by DPoP (RFC 9449):** the SDK sender-constrains
+  both tokens to a non-extractable WebCrypto P-256 key (in IndexedDB), so an
+  exfiltrated refresh token can't be redeemed and a DPoP-bound access token is
+  rejected at userinfo without a fresh proof for the same key. This collapses
+  "steal once, replay anywhere" into "must run code in the live session" — a
+  large but not total reduction (an in-page payload can still use the key as a
+  signing oracle while it runs; a strict CSP is the load-bearing control). DPoP
+  is honored, not required, so plain-bearer clients keep working during rollout.
+  The all-public-client posture rules out a confidential BFF, so DPoP — not the
+  BFF sketched in `docs/research/sso-patterns.md` — is the sender-constraint.
 - **`get_session_by_hash` returns expired sessions** (the one caller checks
   expiry). Latent API trap, not a live bug.

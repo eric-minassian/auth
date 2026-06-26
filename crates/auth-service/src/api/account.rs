@@ -19,6 +19,13 @@ pub struct PasskeyInfo {
     pub name: String,
     pub created_at: i64,
     pub last_used_at: Option<i64>,
+    /// WebAuthn Backup-Eligible hint: `true` for a syncable ("synced") passkey,
+    /// `false` for a device-bound one. Informational only — `null` if unknown.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backup_eligible: Option<bool>,
+    /// WebAuthn Backup-State hint: `true` if currently backed up.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backup_state: Option<bool>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -33,6 +40,12 @@ pub struct SessionListItem {
     pub last_seen_at: i64,
     pub amr: Vec<String>,
     pub current: bool,
+    /// Coarse "Browser on OS" device label captured at sign-in (display only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device: Option<String>,
+    /// Coarse region (ISO country code) captured at sign-in.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -61,6 +74,8 @@ pub async fn list_passkeys(
                 "name": c.name,
                 "created_at": c.created_at,
                 "last_used_at": c.last_used_at,
+                "backup_eligible": c.backup_eligible(),
+                "backup_state": c.backup_state(),
             })
         })
         .collect::<Vec<_>>();
@@ -166,6 +181,8 @@ pub async fn list_sessions(
                 "last_seen_at": s.last_seen_at,
                 "amr": s.amr,
                 "current": s.sid_hash == session.sid_hash,
+                "device": s.device,
+                "region": s.region,
             })
         })
         .collect::<Vec<_>>();
@@ -199,11 +216,21 @@ pub async fn revoke_session(
 /// DELETE /api/account — permanently delete the account and everything bound
 /// to it: passkeys, sessions (each cascading to refresh families +
 /// back-channel logout), then the user record itself.
+///
+/// Requires a recent WebAuthn step-up. Deletion is irreversible by design (no
+/// help-desk, no undelete), so the single most catastrophic action gets the
+/// same fresh-assertion gate as adding a passkey or rotating recovery codes —
+/// a stolen bearer session (e.g. an XSS riding the host-only cookie past the
+/// CSRF Origin check) must not be able to destroy the account silently.
 #[utoipa::path(
     delete,
     path = "/api/account",
     tag = "account",
-    responses((status = 200, body = super::OkResponse), (status = 401, body = super::ErrorResponse)),
+    responses(
+        (status = 200, body = super::OkResponse),
+        (status = 401, body = super::ErrorResponse),
+        (status = 409, body = super::ErrorResponse, description = "Step-up re-authentication required"),
+    ),
 )]
 pub async fn delete_account(
     State(state): State<AppState>,
@@ -211,6 +238,12 @@ pub async fn delete_account(
     jar: axum_extra::extract::CookieJar,
 ) -> Result<(axum_extra::extract::CookieJar, Json<Value>), ApiError> {
     rate_limit_account(&state, &session.sid_hash).await?;
+    if crate::store::now() - session.reauth_at > REAUTH_FRESHNESS_SECS {
+        return Err(ApiError::Conflict {
+            code: "reauth_required",
+            message: "re-authenticate with a passkey before deleting your account".to_string(),
+        });
+    }
     let user = state
         .store
         .get_user(session.user_id)

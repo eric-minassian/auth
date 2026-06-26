@@ -23,7 +23,13 @@ export interface AccessTokenClaims {
   iat: number;
   exp: number;
   jti: string;
-  email?: string;
+  /**
+   * DPoP confirmation (RFC 9449). Present when the token is sender-constrained:
+   * `cnf.jkt` is the JWK thumbprint of the key it is bound to. A resource
+   * server that wants full DPoP enforcement must additionally verify a proof
+   * for this key — `jose`'s plain JWKS verify only checks the signature.
+   */
+  cnf?: { jkt: string };
 }
 
 export type AuthResult =

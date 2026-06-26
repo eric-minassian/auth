@@ -18,6 +18,11 @@ export interface paths {
          * DELETE /api/account — permanently delete the account and everything bound
          *     to it: passkeys, sessions (each cascading to refresh families +
          *     back-channel logout), then the user record itself.
+         * @description Requires a recent WebAuthn step-up. Deletion is irreversible by design (no
+         *     help-desk, no undelete), so the single most catastrophic action gets the
+         *     same fresh-assertion gate as adding a passkey or rotating recovery codes —
+         *     a stolen bearer session (e.g. an XSS riding the host-only cookie past the
+         *     CSRF Origin check) must not be able to destroy the account silently.
          */
         delete: operations["delete_account"];
         options?: never;
@@ -462,6 +467,13 @@ export interface components {
             ok: boolean;
         };
         PasskeyInfo: {
+            /**
+             * @description WebAuthn Backup-Eligible hint: `true` for a syncable ("synced") passkey,
+             *     `false` for a device-bound one. Informational only — `null` if unknown.
+             */
+            backup_eligible?: boolean | null;
+            /** @description WebAuthn Backup-State hint: `true` if currently backed up. */
+            backup_state?: boolean | null;
             /** Format: int64 */
             created_at: number;
             credential_id: string;
@@ -518,8 +530,12 @@ export interface components {
             /** Format: int64 */
             created_at: number;
             current: boolean;
+            /** @description Coarse "Browser on OS" device label captured at sign-in (display only). */
+            device?: string | null;
             /** Format: int64 */
             last_seen_at: number;
+            /** @description Coarse region (ISO country code) captured at sign-in. */
+            region?: string | null;
             session_id: string;
         };
         SessionMeta: {
@@ -583,6 +599,15 @@ export interface operations {
                 };
             };
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Step-up re-authentication required */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };

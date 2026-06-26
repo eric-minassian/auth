@@ -1,5 +1,6 @@
 pub mod ceremonies;
 pub mod credentials;
+pub mod dpop;
 pub mod oauth;
 pub mod pow;
 pub mod rate_limit;

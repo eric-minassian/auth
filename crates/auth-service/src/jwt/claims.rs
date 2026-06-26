@@ -5,6 +5,13 @@ pub const ACCESS_TOKEN_TTL_SECS: i64 = 10 * 60;
 pub const ID_TOKEN_TTL_SECS: i64 = 10 * 60;
 pub const LOGOUT_TOKEN_TTL_SECS: i64 = 2 * 60;
 
+/// RFC 7800 confirmation claim. `jkt` is the JWK SHA-256 thumbprint (RFC 9449
+/// §6) the token is sender-constrained to — present only on DPoP-bound tokens.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Cnf {
+    pub jkt: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccessTokenClaims {
     pub iss: String,
@@ -16,6 +23,9 @@ pub struct AccessTokenClaims {
     pub iat: i64,
     pub exp: i64,
     pub jti: String,
+    /// DPoP sender-constraint (RFC 9449). Absent on plain bearer tokens.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cnf: Option<Cnf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

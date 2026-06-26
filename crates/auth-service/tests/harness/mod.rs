@@ -93,7 +93,13 @@ impl TestApp {
     pub async fn login_as(&mut self, user_id: Uuid) {
         let (sid, _session) = self
             .store
-            .create_session(user_id, SessionLevel::Full, vec!["webauthn".to_string()])
+            .create_session(
+                user_id,
+                SessionLevel::Full,
+                vec!["webauthn".to_string()],
+                None,
+                None,
+            )
             .await
             .expect("create full session");
         self.server.add_cookie(Cookie::new("auth_session", sid));

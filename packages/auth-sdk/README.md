@@ -50,9 +50,14 @@ function Profile() {
   const { state, signIn, signOut } = useAuth();
   const user = useUser();
   if (state.status !== "authenticated") return <button onClick={() => signIn()}>Sign in</button>;
-  return <button onClick={() => signOut()}>Sign out {user?.email}</button>;
+  // Identity is `user.sub`; `nickname` is a mutable display label (profile scope).
+  return <button onClick={() => signOut()}>Sign out {user?.nickname ?? user?.sub}</button>;
 }
 ```
+
+> Identity is keyed on `sub` (plus the issuer) — never on `nickname`, which is
+> mutable and non-unique. This provider issues no email. The default scope is
+> `openid profile offline_access`.
 
 ## Server (`/server`, `/server/hono`, `/server/express`)
 
@@ -80,6 +85,32 @@ app.use("/api", requireAuth(verifier)); // claims at req.auth
 ```
 
 `verifyLogoutToken` validates back-channel logout tokens at your RP's logout receiver.
+
+## Security / threat model
+
+This is a **public-client** SDK: the entire flow (PKCE, token exchange,
+rotation) runs in the browser, so there is no client secret. The honest
+exposure is **XSS** — a script injected into your page can read the in-memory
+access token and the `sessionStorage` refresh token and use them. The SDK
+mitigates this, it does not eliminate it:
+
+- **DPoP (RFC 9449), automatic.** Tokens are sender-constrained to a
+  **non-extractable** P-256 key generated in-browser and kept in IndexedDB. An
+  exfiltrated refresh token can't be redeemed without that key, and a
+  DPoP-bound access token (`cnf.jkt`) is rejected by the IdP's userinfo without
+  a fresh proof. (A live in-page payload can still use the key as a signing
+  oracle while it runs — DPoP shrinks the blast radius, it isn't a wall.) Falls
+  back to bearer where WebCrypto/IndexedDB are unavailable.
+- Access token in memory only; refresh token in `sessionStorage` (not
+  `localStorage`); rotation + server-side reuse detection revokes a whole token
+  family on replay.
+
+**Your responsibility:** ship a strict `Content-Security-Policy` (no
+`unsafe-inline`/`unsafe-eval` scripts) so XSS can't run in the first place — it
+is the load-bearing control behind everything above. To fully enforce DPoP at
+*your own* resource server, verify a proof for the access token's `cnf.jkt`
+(the bundled verifier checks the JWS signature, not the proof). A confidential
+BFF is **not** an option here — every client is public by design.
 
 ## Development
 

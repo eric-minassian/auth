@@ -1,6 +1,7 @@
 pub mod authorize;
 pub mod cors;
 pub mod discovery;
+pub mod dpop;
 pub mod jwks;
 pub mod logout;
 pub mod pkce;

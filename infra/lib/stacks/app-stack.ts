@@ -148,6 +148,9 @@ export class AuthAppStack extends cdk.Stack {
         headerBehavior: cloudfront.OriginRequestHeaderBehavior.allowList(
           "CloudFront-Viewer-Address",
           "CloudFront-Viewer-ASN",
+          // Coarse country for the account page's "where you're signed in"
+          // session list (country only — never the IP).
+          "CloudFront-Viewer-Country",
           "Origin",
           "Content-Type",
           "Accept",
@@ -159,12 +162,32 @@ export class AuthAppStack extends cdk.Stack {
         ),
       },
     );
+    // Security headers for the API / OIDC / metadata surface. Deliberately
+    // omits frameOptions / frame-ancestors so /oauth/authorize stays iframe-able
+    // for the SDK's prompt=none silent-auth flow (the SPA's own policy below
+    // keeps DENY). HSTS is host-scoped so this mainly backstops non-SPA paths.
+    const apiSecurity = new cloudfront.ResponseHeadersPolicy(this, "ApiSecurityHeaders", {
+      securityHeadersBehavior: {
+        strictTransportSecurity: {
+          accessControlMaxAge: cdk.Duration.days(365),
+          includeSubdomains: true,
+          preload: true,
+          override: true,
+        },
+        contentTypeOptions: { override: true },
+        referrerPolicy: {
+          referrerPolicy: cloudfront.HeadersReferrerPolicy.NO_REFERRER,
+          override: true,
+        },
+      },
+    });
     const apiBehavior: cloudfront.BehaviorOptions = {
       origin: apiOrigin,
       viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
       allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
       cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
       originRequestPolicy: apiOriginRequestPolicy,
+      responseHeadersPolicy: apiSecurity,
     };
     // For JWKS/discovery: cache at the edge per the origin's Cache-Control, but
     // do NOT key on (and thus forward) Host — the managed
@@ -184,6 +207,7 @@ export class AuthAppStack extends cdk.Stack {
       allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
       cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
       originRequestPolicy: cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
+      responseHeadersPolicy: apiSecurity,
     };
 
     // SPA client-side routing: rewrite extensionless paths to /index.html.
@@ -206,11 +230,47 @@ export class AuthAppStack extends cdk.Stack {
         },
         contentTypeOptions: { override: true },
         frameOptions: { frameOption: cloudfront.HeadersFrameOption.DENY, override: true },
-        contentSecurityPolicy: {
-          contentSecurityPolicy:
-            "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+        referrerPolicy: {
+          referrerPolicy: cloudfront.HeadersReferrerPolicy.STRICT_ORIGIN_WHEN_CROSS_ORIGIN,
           override: true,
         },
+        contentSecurityPolicy: {
+          // script-src 'self' (no inline/eval) is the load-bearing control — the
+          // whole token model assumes no XSS. object-src 'none' kills plugin
+          // vectors; upgrade-insecure-requests forecloses mixed content.
+          // style-src keeps 'unsafe-inline' because Radix/sonner set inline
+          // style *attributes*, which CSP nonces/hashes can't cover; this does
+          // not loosen scripts. (No SRI: every script is same-origin from the
+          // OAC-locked S3 origin — if that origin is compromised, so is the HTML.)
+          contentSecurityPolicy:
+            "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; upgrade-insecure-requests",
+          override: true,
+        },
+      },
+      // The CDK CSP field is enforce-only, so Trusted Types is staged here in
+      // Report-Only first (surfacing any dependency that writes to a DOM sink)
+      // before folding `require-trusted-types-for 'script'` into the enforced
+      // CSP above. COOP isolates the browsing-context group (XS-Leaks); the
+      // Permissions-Policy denies powerful features and pins WebAuthn to self.
+      customHeadersBehavior: {
+        customHeaders: [
+          {
+            header: "Content-Security-Policy-Report-Only",
+            value: "require-trusted-types-for 'script'",
+            override: true,
+          },
+          {
+            header: "Cross-Origin-Opener-Policy",
+            value: "same-origin-allow-popups",
+            override: true,
+          },
+          {
+            header: "Permissions-Policy",
+            value:
+              "camera=(), microphone=(), geolocation=(), payment=(), usb=(), serial=(), hid=(), publickey-credentials-get=(self), publickey-credentials-create=(self)",
+            override: true,
+          },
+        ],
       },
     });
 

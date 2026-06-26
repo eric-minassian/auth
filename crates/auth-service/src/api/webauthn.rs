@@ -302,6 +302,8 @@ pub async fn login_finish(
             stored.user_id,
             SessionLevel::Full,
             vec!["webauthn".to_string()],
+            super::summarize_user_agent(&headers),
+            super::client_region(&headers),
         )
         .await?;
     tracing::info!(target: "audit", event = "login", user_id = %stored.user_id);
