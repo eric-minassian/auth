@@ -268,6 +268,30 @@ describe("AuthApp", () => {
     });
   });
 
+  it("wires CSP / Trusted-Types violation reporting to /api/reports", () => {
+    app.hasResourceProperties("AWS::CloudFront::ResponseHeadersPolicy", {
+      ResponseHeadersPolicyConfig: Match.objectLike({
+        SecurityHeadersConfig: Match.objectLike({
+          ContentSecurityPolicy: Match.objectLike({
+            ContentSecurityPolicy: Match.stringLikeRegexp("report-to csp-endpoint"),
+          }),
+        }),
+        CustomHeadersConfig: Match.objectLike({
+          Items: Match.arrayWith([
+            Match.objectLike({
+              Header: "Reporting-Endpoints",
+              Value: Match.stringLikeRegexp("/api/reports"),
+            }),
+            Match.objectLike({
+              Header: "Content-Security-Policy-Report-Only",
+              Value: Match.stringLikeRegexp("report-to csp-endpoint"),
+            }),
+          ]),
+        }),
+      }),
+    });
+  });
+
   it("sets HSTS + no-referrer on the API surface without frame-denying it", () => {
     // /oauth/authorize must stay iframe-able for the SDK's silent-auth flow, so
     // the API headers policy carries HSTS + Referrer-Policy but no FrameOptions.

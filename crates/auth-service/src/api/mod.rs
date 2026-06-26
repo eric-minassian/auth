@@ -1,5 +1,6 @@
 pub mod account;
 pub mod recovery;
+pub mod reports;
 pub mod session;
 pub mod signup;
 pub mod webauthn;

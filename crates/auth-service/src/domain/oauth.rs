@@ -26,6 +26,12 @@ pub struct OidcClient {
     #[serde(default)]
     pub allowed_origins: Vec<String>,
     pub scopes: Vec<String>,
+    /// Require DPoP (RFC 9449) for this client: token requests without a valid
+    /// proof are rejected, so every token it holds is sender-constrained.
+    /// Default off — flip per client only after it has adopted the DPoP-capable
+    /// SDK, or its logins break.
+    #[serde(default)]
+    pub require_dpop: bool,
 }
 
 impl OidcClient {

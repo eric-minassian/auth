@@ -25,6 +25,7 @@ fn rp_client() -> OidcClient {
             "profile".to_string(),
             "offline_access".to_string(),
         ],
+        require_dpop: false,
     }
 }
 
@@ -151,6 +152,7 @@ async fn refresh_with_wrong_client_id_revokes_the_family() {
         backchannel_logout_uri: None,
         allowed_origins: vec![],
         scopes: vec!["openid".to_string()],
+        require_dpop: false,
     })
     .await;
 

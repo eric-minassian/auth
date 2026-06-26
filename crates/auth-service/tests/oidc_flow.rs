@@ -26,6 +26,7 @@ fn rp_client() -> OidcClient {
             "profile".to_string(),
             "offline_access".to_string(),
         ],
+        require_dpop: false,
     }
 }
 

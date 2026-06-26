@@ -84,6 +84,7 @@ async fn seed_clients(
             "profile".to_string(),
             "offline_access".to_string(),
         ],
+        require_dpop: false,
     };
     store.put_client(&dev_client).await?;
     Ok(())
