@@ -41,8 +41,13 @@ export const api = {
 };
 
 export interface SessionInfo {
-  user: { user_id: string; email: string };
+  user: { user_id: string; nickname: string };
   session: { created_at: number; amr: string[] };
+}
+
+export interface RecoveryReadiness {
+  passkey_count: number;
+  recovery_codes_remaining: number;
 }
 
 export interface PasskeyInfo {
