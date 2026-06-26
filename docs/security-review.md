@@ -72,3 +72,10 @@ break production; each has a clear gate and a one-line change to enforce.
   DPoP-capable SDK (`@ericminassian/auth` ≥ the cnf/DPoP release) — flipping
   early breaks its logins. The AWS-managed WAF rule sets are staged the same way
   (COUNT before BLOCK; see `infra/lib/stacks/app-stack.ts`).
+- **HSTS preload submission (manual).** The SPA and API already send
+  `Strict-Transport-Security: max-age=31536000; includeSubdomains; preload`, but
+  the browser preload list is opt-in: submit `ericminassian.com` at
+  <https://hstspreload.org> once (it covers `auth.` via `includeSubdomains`).
+  This is a one-time operator action — there is no code change. A CAA record now
+  pins certificate issuance to Amazon's CAs (ACM), and
+  `/.well-known/security.txt` (RFC 9116) publishes the disclosure contact.

@@ -422,6 +422,9 @@ export class AuthAppStack extends cdk.Stack {
     );
     new route53.ARecord(this, "AliasA", { zone: props.hostedZone, target: recordTarget });
     new route53.AaaaRecord(this, "AliasAaaa", { zone: props.hostedZone, target: recordTarget });
+    // CAA: only Amazon's CAs (which ACM uses) may issue certs for this host —
+    // a mis-issued cert from any other CA would be refused at validation time.
+    new route53.CaaAmazonRecord(this, "Caa", { zone: props.hostedZone });
 
     // --- Security alerting: alarm on the compromise signals in the audit log.
     // refresh-token reuse and auth-code replay are auto-revoked by the backend

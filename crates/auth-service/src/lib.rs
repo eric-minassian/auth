@@ -104,6 +104,11 @@ pub fn build_router(state: AppState) -> Router {
             get(oidc::discovery::openid_configuration),
         )
         .route("/.well-known/jwks.json", get(oidc::jwks::jwks))
+        // RFC 9116 vulnerability-disclosure contact.
+        .route(
+            "/.well-known/security.txt",
+            get(oidc::security_txt::security_txt),
+        )
         .layer(axum_middleware::from_fn(oidc::cors::allow_public));
 
     router = router
