@@ -112,3 +112,27 @@ async fn csrf_rejects_cross_origin_posts() {
         .await
         .assert_status(StatusCode::OK);
 }
+
+#[tokio::test]
+async fn csp_report_sink_is_csrf_exempt() {
+    let app = TestApp::spawn().await;
+    let report = json!([{
+        "type": "csp-violation",
+        "body": { "effectiveDirective": "require-trusted-types-for", "blockedURL": "", "sample": "x" }
+    }]);
+
+    // No Origin and a non-JSON content type — rejected on any other /api/* path,
+    // but the browser-posted report sink is exempt (and log-only).
+    app.server
+        .post("/api/reports")
+        .text(report.to_string())
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+
+    // Control: the same cross-context shape on a guarded path is still rejected.
+    app.server
+        .post("/api/signup/start")
+        .text("{}")
+        .await
+        .assert_status(StatusCode::FORBIDDEN);
+}

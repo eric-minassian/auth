@@ -76,6 +76,20 @@ pub async fn token(
     let htu = format!("{}/oauth/token", state.cfg.issuer);
     let dpop_jkt = dpop_binding(&state, &headers, &htu).await?;
 
+    // A client may opt into requiring DPoP: with no proof, reject before issuing
+    // an unbound bearer token. Only look up the client in the rejectable case
+    // (no proof) — a presented proof satisfies the requirement regardless.
+    if dpop_jkt.is_none()
+        && let Some(client_id) = req.client_id.as_deref()
+        && state
+            .store
+            .get_client(client_id)
+            .await?
+            .is_some_and(|client| client.require_dpop)
+    {
+        return Err(invalid_dpop("DPoP proof required for this client"));
+    }
+
     let response = match req.grant_type.as_str() {
         "authorization_code" => exchange_code(&state, &req, dpop_jkt.as_deref(), &abuse).await?,
         "refresh_token" => refresh(&state, &req, dpop_jkt.as_deref(), &abuse).await?,

@@ -34,6 +34,7 @@ async fn bootstrap_with_backchannel(
             "profile".to_string(),
             "offline_access".to_string(),
         ],
+        require_dpop: false,
     })
     .await;
 

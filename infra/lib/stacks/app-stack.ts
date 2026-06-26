@@ -254,21 +254,33 @@ export class AuthAppStack extends cdk.Stack {
           // style *attributes*, which CSP nonces/hashes can't cover; this does
           // not loosen scripts. (No SRI: every script is same-origin from the
           // OAC-locked S3 origin — if that origin is compromised, so is the HTML.)
+          // `report-to csp-endpoint` ships violations to /api/reports (the
+          // endpoint is named by the Reporting-Endpoints header below), so any
+          // CSP breach in production is observable rather than silent.
           contentSecurityPolicy:
-            "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; upgrade-insecure-requests",
+            "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; upgrade-insecure-requests; report-to csp-endpoint",
           override: true,
         },
       },
       // The CDK CSP field is enforce-only, so Trusted Types is staged here in
-      // Report-Only first (surfacing any dependency that writes to a DOM sink)
-      // before folding `require-trusted-types-for 'script'` into the enforced
-      // CSP above. COOP isolates the browsing-context group (XS-Leaks); the
-      // Permissions-Policy denies powerful features and pins WebAuthn to self.
+      // Report-Only first. With the report-to sink now wired, violations land at
+      // /api/reports — so we can confirm react-dom/Radix/sonner never touch a
+      // TT-guarded sink in prod BEFORE folding `require-trusted-types-for
+      // 'script'` into the enforced CSP above. COOP isolates the
+      // browsing-context group (XS-Leaks); the Permissions-Policy denies
+      // powerful features and pins WebAuthn to self.
       customHeadersBehavior: {
         customHeaders: [
           {
+            // Names the `csp-endpoint` group referenced by both report-to
+            // directives (modern Reporting API).
+            header: "Reporting-Endpoints",
+            value: `csp-endpoint="${issuerUrl(config)}/api/reports"`,
+            override: true,
+          },
+          {
             header: "Content-Security-Policy-Report-Only",
-            value: "require-trusted-types-for 'script'",
+            value: "require-trusted-types-for 'script'; report-to csp-endpoint",
             override: true,
           },
           {

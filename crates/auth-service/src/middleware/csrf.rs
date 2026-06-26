@@ -17,7 +17,13 @@ use crate::state::AppState;
 /// them).
 pub async fn enforce(State(state): State<AppState>, req: Request, next: Next) -> Response {
     let safe_method = matches!(*req.method(), Method::GET | Method::HEAD | Method::OPTIONS);
-    if safe_method || !req.uri().path().starts_with("/api/") || allowed(req.headers(), &state) {
+    let path = req.uri().path();
+    // /api/reports is the browser's CSP/Trusted-Types report sink: it reads no
+    // cookies and the browser POSTs it cross-context with a `reports+json`
+    // content type, so the Origin/JSON CSRF gate doesn't apply (and would reject
+    // it). It is rate-limited and strictly log-only instead (see api::reports).
+    let csrf_exempt = path == "/api/reports";
+    if safe_method || !path.starts_with("/api/") || csrf_exempt || allowed(req.headers(), &state) {
         next.run(req).await
     } else {
         (

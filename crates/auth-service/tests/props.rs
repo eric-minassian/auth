@@ -57,6 +57,7 @@ proptest! {
             backchannel_logout_uri: None,
             allowed_origins: vec![],
             scopes: vec![],
+            require_dpop: false,
         };
         prop_assert!(client.allows_redirect_uri(registered));
         let mutated = format!("{registered}{suffix}");

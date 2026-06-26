@@ -24,6 +24,9 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/signup/pow", get(api::signup::pow))
         .route("/api/signup/start", post(api::signup::start))
         .route("/api/signup/finish", post(api::signup::finish))
+        // Browser-posted CSP / Trusted-Types violation reports (CSRF-exempt; see
+        // middleware::csrf and api::reports).
+        .route("/api/reports", post(api::reports::reports))
         .route("/api/recovery/redeem", post(api::recovery::redeem))
         .route("/api/session", get(api::session::get))
         .route("/api/session/logout", post(api::session::logout))

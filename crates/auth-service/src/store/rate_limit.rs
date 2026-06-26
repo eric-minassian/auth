@@ -26,6 +26,9 @@ pub enum RateClass {
     TokenIp,
     /// Mutating account-management calls per session.
     AccountSession,
+    /// CSP / Trusted-Types violation reports per client IP (/64) — bounds
+    /// log-flooding from an unauthenticated, CSRF-exempt sink.
+    ReportsIp,
 }
 
 impl RateClass {
@@ -38,6 +41,7 @@ impl RateClass {
             Self::LoginIp => "login-ip",
             Self::TokenIp => "token-ip",
             Self::AccountSession => "account-session",
+            Self::ReportsIp => "reports-ip",
         }
     }
 
@@ -51,6 +55,7 @@ impl RateClass {
             Self::LoginIp => (20, 3600),
             Self::TokenIp => (60, 60),
             Self::AccountSession => (30, 3600),
+            Self::ReportsIp => (120, 60),
         }
     }
 }

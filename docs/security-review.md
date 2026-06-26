@@ -54,3 +54,21 @@ below.
   BFF sketched in `docs/research/sso-patterns.md` — is the sender-constraint.
 - **`get_session_by_hash` returns expired sessions** (the one caller checks
   expiry). Latent API trap, not a live bug.
+
+## Staged hardening — flip when ready
+
+Two protections ship in observe/opt-in mode because flipping them blind would
+break production; each has a clear gate and a one-line change to enforce.
+
+- **Trusted Types → enforce.** The SPA sends `Content-Security-Policy-Report-Only:
+  require-trusted-types-for 'script'` with a `report-to` sink at `/api/reports`
+  (logged as audit `csp_report`). Flip it into the *enforced* CSP only after the
+  reports show that react-dom 19 / Radix / sonner never touch a TT-guarded sink
+  in prod — and add a Trusted Types default policy first if they do. Until then,
+  enforcing risks throwing on a dependency's sink write.
+- **DPoP → required (per client).** `OidcClient.require_dpop` (default `false`)
+  makes the token endpoint reject a client's bearer (no-proof) requests. Flip it
+  to `true` per RP in `config/clients.json` *after* that RP upgrades to the
+  DPoP-capable SDK (`@ericminassian/auth` ≥ the cnf/DPoP release) — flipping
+  early breaks its logins. The AWS-managed WAF rule sets are staged the same way
+  (COUNT before BLOCK; see `infra/lib/stacks/app-stack.ts`).

@@ -30,6 +30,7 @@ fn rp_client() -> OidcClient {
             "profile".to_string(),
             "offline_access".to_string(),
         ],
+        require_dpop: false,
     }
 }
 
@@ -212,6 +213,65 @@ async fn dpop_binds_refresh_and_userinfo_to_the_proof_key() {
         ])
         .await;
     res.assert_status(StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn require_dpop_client_rejects_a_bearer_token_request() {
+    let mut app = TestApp::spawn().await;
+    // A client identical to rp but with DPoP required.
+    let mut client = rp_client();
+    client.client_id = "rp-dpop".to_string();
+    client.require_dpop = true;
+    app.seed_client(&client).await;
+    let mut authn = flows::new_authenticator();
+    flows::signup_with_passkey(&mut app, "require-dpop@example.com", &mut authn).await;
+
+    let token_htu = format!("{}/oauth/token", harness::ISSUER);
+    let verifier = random_b64u(32);
+    let challenge = sha256_b64u(&verifier);
+    let res = app
+        .server
+        .get("/oauth/authorize")
+        .add_query_param("response_type", "code")
+        .add_query_param("client_id", "rp-dpop")
+        .add_query_param("redirect_uri", RP_CALLBACK)
+        .add_query_param("scope", "openid")
+        .add_query_param("code_challenge", &challenge)
+        .add_query_param("code_challenge_method", "S256")
+        .await;
+    let url = Url::parse(res.header("location").to_str().unwrap()).unwrap();
+    let code = url
+        .query_pairs()
+        .find(|(k, _)| k == "code")
+        .map(|(_, v)| v.to_string())
+        .expect("code");
+
+    let exchange = |dpop: Option<String>| {
+        let mut req = app.server.post("/oauth/token");
+        if let Some(proof) = dpop {
+            req = req.add_header("dpop", proof);
+        }
+        req.form(&[
+            ("grant_type", "authorization_code"),
+            ("code", code.as_str()),
+            ("redirect_uri", RP_CALLBACK),
+            ("client_id", "rp-dpop"),
+            ("code_verifier", verifier.as_str()),
+        ])
+    };
+
+    // No proof → rejected BEFORE the code is consumed (the require check runs
+    // ahead of code exchange).
+    let res = exchange(None).await;
+    res.assert_status(StatusCode::BAD_REQUEST);
+    let err: serde_json::Value = res.json();
+    assert_eq!(err["error"], "invalid_dpop_proof");
+
+    // The same code, now WITH a proof, succeeds — proving it wasn't consumed.
+    let dpop = DpopKey::new();
+    let res = exchange(Some(dpop.proof("POST", &token_htu, None))).await;
+    res.assert_status(StatusCode::OK);
+    assert_eq!(res.json::<serde_json::Value>()["token_type"], "DPoP");
 }
 
 #[tokio::test]
