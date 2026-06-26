@@ -116,6 +116,24 @@ pub fn client_asn(headers: &HeaderMap) -> Option<String> {
         .map(str::to_string)
 }
 
+/// The already-computed source identifiers (IP bucketed to /64, origin ASN)
+/// attached to abuse audit events so an operator alerted on a reuse/replay can
+/// see *who* without re-deriving it. Both are CloudFront-tamper-proofed behind
+/// the origin lock.
+pub struct AbuseContext {
+    pub ip: String,
+    pub asn: Option<String>,
+}
+
+impl AbuseContext {
+    pub fn from_headers(headers: &HeaderMap) -> Self {
+        Self {
+            ip: rate_ip_key(headers),
+            asn: client_asn(headers),
+        }
+    }
+}
+
 /// Generic success envelope (`{ "ok": true }`).
 #[derive(Serialize, ToSchema)]
 pub struct OkResponse {

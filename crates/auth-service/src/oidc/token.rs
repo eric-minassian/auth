@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::{OAuthError, dpop, pkce};
-use crate::api::rate_ip_key;
+use crate::api::AbuseContext;
 use crate::crypto::random_b64u;
 use crate::domain::oauth::{SCOPE_OFFLINE_ACCESS, SCOPE_OPENID, SCOPE_PROFILE, scope_contains};
 use crate::domain::user::User;
@@ -57,10 +57,10 @@ pub async fn token(
     headers: HeaderMap,
     Form(req): Form<TokenRequest>,
 ) -> Result<Response, OAuthError> {
-    let ip = rate_ip_key(&headers);
+    let abuse = AbuseContext::from_headers(&headers);
     if !state
         .store
-        .rate_allow(RateClass::TokenIp, &ip)
+        .rate_allow(RateClass::TokenIp, &abuse.ip)
         .await
         .map_err(OAuthError::from)?
     {
@@ -77,8 +77,8 @@ pub async fn token(
     let dpop_jkt = dpop_binding(&state, &headers, &htu).await?;
 
     let response = match req.grant_type.as_str() {
-        "authorization_code" => exchange_code(&state, &req, dpop_jkt.as_deref()).await?,
-        "refresh_token" => refresh(&state, &req, dpop_jkt.as_deref()).await?,
+        "authorization_code" => exchange_code(&state, &req, dpop_jkt.as_deref(), &abuse).await?,
+        "refresh_token" => refresh(&state, &req, dpop_jkt.as_deref(), &abuse).await?,
         _ => return Err(OAuthError::unsupported_grant_type()),
     };
     Ok((
@@ -134,6 +134,7 @@ async fn exchange_code(
     state: &AppState,
     req: &TokenRequest,
     dpop_jkt: Option<&str>,
+    abuse: &AbuseContext,
 ) -> Result<TokenResponse, OAuthError> {
     let code = req
         .code
@@ -158,7 +159,7 @@ async fn exchange_code(
     let data = match state.store.consume_auth_code(code, &family_id).await? {
         CodeConsume::Consumed(data) => data,
         CodeConsume::Replayed { issued_family_id } => {
-            tracing::warn!(target: "audit", event = "code_replayed", client_id);
+            tracing::warn!(target: "audit", event = "code_replayed", client_id, ip = %abuse.ip, asn = abuse.asn.as_deref());
             if let Some(family) = issued_family_id {
                 state
                     .store
@@ -224,6 +225,7 @@ async fn refresh(
     state: &AppState,
     req: &TokenRequest,
     dpop_jkt: Option<&str>,
+    abuse: &AbuseContext,
 ) -> Result<TokenResponse, OAuthError> {
     let token = req
         .refresh_token
@@ -257,6 +259,8 @@ async fn refresh(
                 client_id = %family.client_id,
                 user_id = %family.user_id,
                 family_id = %family.family_id,
+                ip = %abuse.ip,
+                asn = abuse.asn.as_deref(),
             );
             return Err(OAuthError::invalid_grant());
         }
