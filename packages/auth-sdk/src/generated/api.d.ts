@@ -63,6 +63,48 @@ export interface paths {
         patch: operations["rename_passkey"];
         trace?: never;
     };
+    "/api/account/recovery-codes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * POST /api/account/recovery-codes — (re)generate the account's recovery
+         *     codes, returning them exactly once. Requires a recent WebAuthn step-up
+         *     (`/api/webauthn/reauth/*`); a fresh login also counts.
+         */
+        post: operations["generate_recovery_codes"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/account/recovery-readiness": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * GET /api/account/recovery-readiness — how protected the account is against
+         *     device loss (passkey count + remaining recovery codes), for nudging the user
+         *     to add a backup passkey or save recovery codes.
+         */
+        get: operations["recovery_readiness"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/account/sessions": {
         parameters: {
             query?: never;
@@ -116,7 +158,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/recovery/start": {
+    "/api/recovery/redeem": {
         parameters: {
             query?: never;
             header?: never;
@@ -126,30 +168,14 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * POST /api/recovery/start — sends a recovery OTP if the account exists.
-         *     Uniform 200 either way (anti-enumeration).
+         * POST /api/recovery/redeem — consume a one-time recovery code and issue an
+         *     enroll-level session so a new passkey can be registered. There is no email
+         *     step: the code is the sole break-glass credential. On success every existing
+         *     session and refresh family is revoked (a reset, not an additive grant), so a
+         *     stolen code can't silently coexist with the victim's live sessions. Reaching
+         *     a full session still requires a passkey login afterwards.
          */
-        post: operations["start"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/recovery/verify": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * POST /api/recovery/verify — consumes the OTP and issues an enroll-level
-         *     session on the existing account so a new passkey can be registered.
-         */
-        post: operations["verify"];
+        post: operations["redeem"];
         delete?: never;
         options?: never;
         head?: never;
@@ -194,6 +220,50 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/signup/finish": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * POST /api/signup/finish — verify the passkey and activate the account
+         *     atomically with its first credential. Deliberately does NOT mint a full
+         *     session: the client then logs in with the new passkey (`login/finish`) to
+         *     obtain one, so a full session always reflects a real, user-verified
+         *     assertion (and `amr` is honest).
+         */
+        post: operations["finish"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/signup/pow": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * GET /api/signup/pow — issue a one-time proof-of-work challenge the client
+         *     must solve before `signup/start`. A soft cost on mass automated signup
+         *     (open registration has no email to lean on); not a Sybil/humanness proof.
+         */
+        get: operations["pow"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/signup/start": {
         parameters: {
             query?: never;
@@ -204,31 +274,12 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * POST /api/signup/start — sends an OTP (or an "account exists" notice).
-         *     Uniform 200 regardless of account existence (anti-enumeration).
+         * POST /api/signup/start — verify the proof-of-work, create a *pending*
+         *     account, and begin a passkey registration ceremony. No email, no username:
+         *     a nickname plus a passkey is the entire signup. Returns an enroll-level
+         *     session whose only capability is finishing this registration.
          */
         post: operations["start"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/signup/verify": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * POST /api/signup/verify — consumes the OTP, creates the account, and
-         *     issues an enroll-level session whose only capability is registering the
-         *     first passkey.
-         */
-        post: operations["verify"];
         delete?: never;
         options?: never;
         head?: never;
@@ -245,10 +296,10 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * POST /api/webauthn/login/finish — verifies the assertion and issues a
-         *     full session.
-         * @description Body: `{ ceremony_id, credential }` where `credential` is the
-         *     `navigator.credentials.get()` result. Returns `{ user_id }`.
+         * POST /api/webauthn/login/finish — verify the assertion and issue a full
+         *     session. The asserted credential must belong to an existing, active account,
+         *     and the assertion must be user-verified; only then is `amr=["webauthn"]`
+         *     minted. This is the sole path to a full session.
          */
         post: operations["login_finish"];
         delete?: never;
@@ -267,14 +318,52 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * POST /api/webauthn/login/start — no prior auth. Without an email this is
-         *     the discoverable (conditional-UI) flow; with one, an allowCredentials
-         *     challenge for that account. Unknown emails get a discoverable challenge
-         *     so the response shape stays uniform.
-         * @description Body: `{ email? }`. Returns `{ ceremony_id, options }` for
-         *     `navigator.credentials.get()`.
+         * POST /api/webauthn/login/start — begin a usernameless, discoverable login
+         *     (conditional UI / resident keys). Takes no identifier; the authenticator
+         *     reveals which account on `finish`.
          */
         post: operations["login_start"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/webauthn/reauth/finish": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * POST /api/webauthn/reauth/finish — verify the step-up assertion and stamp
+         *     `reauth_at` on the current session. No new session is minted.
+         */
+        post: operations["reauth_finish"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/webauthn/reauth/start": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * POST /api/webauthn/reauth/start — begin a step-up assertion on the current
+         *     full session (we know the user, so allowCredentials is scoped to their
+         *     passkeys). Used to gate sensitive operations like generating recovery codes.
+         */
+        post: operations["reauth_start"];
         delete?: never;
         options?: never;
         head?: never;
@@ -291,10 +380,9 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * POST /api/webauthn/register/finish — stores the passkey; upgrades an
-         *     enroll session to full when it was the first registration step.
-         * @description Body: `{ ceremony_id, credential, name? }` where `credential` is the
-         *     `navigator.credentials.create()` result.
+         * POST /api/webauthn/register/finish — store the passkey. Never elevates the
+         *     session: `Full` is reachable only via `login/finish`, so registering a
+         *     passkey (including during recovery) never by itself grants a full session.
          */
         post: operations["register_finish"];
         delete?: never;
@@ -313,11 +401,9 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * POST /api/webauthn/register/start — enroll or full session.
-         * @description Returns `{ ceremony_id, options }` where `options` is the raw
-         *     `PublicKeyCredentialCreationOptions` to pass to `navigator.credentials
-         *     .create()`. The shape is the standard WebAuthn structure (not modeled in
-         *     this schema).
+         * POST /api/webauthn/register/start — add a passkey to the current account
+         *     (enroll or full session). Used to add backup passkeys, and to register a new
+         *     passkey during recovery. Signup uses its own ceremony (`/api/signup/*`).
          */
         post: operations["register_start"];
         delete?: never;
@@ -356,6 +442,12 @@ export interface components {
             error: string;
             message: string;
         };
+        FinishRequest: {
+            ceremony_id: string;
+            /** @description Raw `navigator.credentials.create()` result (standard WebAuthn shape). */
+            credential: Record<string, never>;
+            name?: string | null;
+        };
         HealthResponse: {
             status: string;
             version: string;
@@ -364,9 +456,6 @@ export interface components {
             ceremony_id: string;
             /** @description Raw `navigator.credentials.get()` result (standard WebAuthn shape). */
             credential: Record<string, never>;
-        };
-        LoginStartRequest: {
-            email?: string | null;
         };
         /** @description Generic success envelope (`{ "ok": true }`). */
         OkResponse: {
@@ -382,6 +471,31 @@ export interface components {
         };
         PasskeyList: {
             passkeys: components["schemas"]["PasskeyInfo"][];
+        };
+        PowChallenge: {
+            challenge: string;
+            /** Format: int32 */
+            difficulty: number;
+        };
+        ReauthFinishRequest: {
+            ceremony_id: string;
+            /** @description Raw `navigator.credentials.get()` result (standard WebAuthn shape). */
+            credential: Record<string, never>;
+        };
+        RecoveryCodes: {
+            codes: string[];
+        };
+        RecoveryReadiness: {
+            passkey_count: number;
+            recovery_codes_remaining: number;
+        };
+        RedeemRequest: {
+            /** @description A recovery code, in any reasonable casing/grouping (normalized server-side). */
+            code: string;
+        };
+        RedeemResponse: {
+            /** Format: uuid */
+            user_id: string;
         };
         RegisterFinishRequest: {
             ceremony_id: string;
@@ -414,11 +528,16 @@ export interface components {
             created_at: number;
         };
         SessionUser: {
-            email: string;
+            nickname: string;
             user_id: string;
         };
         StartRequest: {
-            email: string;
+            /** @description User-chosen display nickname (non-unique, sanitized server-side). */
+            nickname: string;
+            /** @description The challenge string from `GET /api/signup/pow`. */
+            pow_challenge: string;
+            /** @description A nonce such that `SHA-256("{challenge}:{nonce}")` meets the difficulty. */
+            pow_nonce: string;
         };
         TokenRequest: {
             client_id?: string | null;
@@ -436,14 +555,6 @@ export interface components {
             refresh_token?: string | null;
             scope: string;
             token_type: string;
-        };
-        VerifyRequest: {
-            code: string;
-            email: string;
-        };
-        VerifyResponse: {
-            /** Format: uuid */
-            user_id: string;
         };
     };
     responses: never;
@@ -581,6 +692,62 @@ export interface operations {
             };
         };
     };
+    generate_recovery_codes: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Newly generated codes (shown once) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RecoveryCodes"];
+                };
+            };
+            /** @description Step-up re-authentication required */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    recovery_readiness: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RecoveryReadiness"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
     list_sessions: {
         parameters: {
             query?: never;
@@ -657,7 +824,7 @@ export interface operations {
             };
         };
     };
-    start: {
+    redeem: {
         parameters: {
             query?: never;
             header?: never;
@@ -666,39 +833,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["StartRequest"];
-            };
-        };
-        responses: {
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["OkResponse"];
-                };
-            };
-            /** @description Rate limited */
-            429: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
-                };
-            };
-        };
-    };
-    verify: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["VerifyRequest"];
+                "application/json": components["schemas"]["RedeemRequest"];
             };
         };
         responses: {
@@ -708,11 +843,20 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["VerifyResponse"];
+                    "application/json": components["schemas"]["RedeemResponse"];
                 };
             };
             /** @description Invalid or expired code */
             400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -788,7 +932,7 @@ export interface operations {
             };
         };
     };
-    start: {
+    finish: {
         parameters: {
             query?: never;
             header?: never;
@@ -797,17 +941,50 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["StartRequest"];
+                "application/json": components["schemas"]["FinishRequest"];
             };
         };
         responses: {
-            /** @description OTP dispatched (uniform regardless of account existence) */
+            /** @description { user_id, credential_id } */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    pow: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["OkResponse"];
+                    "application/json": components["schemas"]["PowChallenge"];
                 };
             };
             /** @description Rate limited */
@@ -821,7 +998,7 @@ export interface operations {
             };
         };
     };
-    verify: {
+    start: {
         parameters: {
             query?: never;
             header?: never;
@@ -830,20 +1007,18 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["VerifyRequest"];
+                "application/json": components["schemas"]["StartRequest"];
             };
         };
         responses: {
-            /** @description Account created; enroll-level session cookie set */
+            /** @description { ceremony_id, user_id, options }; enroll session cookie set */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content: {
-                    "application/json": components["schemas"]["VerifyResponse"];
-                };
+                content?: never;
             };
-            /** @description Invalid or expired code */
+            /** @description Bad nickname or proof of work */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -852,8 +1027,8 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description Account already exists */
-            409: {
+            /** @description Rate limited */
+            429: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -899,14 +1074,74 @@ export interface operations {
             path?: never;
             cookie?: never;
         };
-        requestBody?: {
-            content: {
-                "application/json": components["schemas"]["LoginStartRequest"];
-            };
-        };
+        requestBody?: never;
         responses: {
             /** @description { ceremony_id, options } */
             200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    reauth_finish: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReauthFinishRequest"];
+            };
+        };
+        responses: {
+            /** @description { ok: true } */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    reauth_start: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description { ceremony_id, options } */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -946,6 +1181,13 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Step-up re-authentication required */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     register_start: {
@@ -965,6 +1207,13 @@ export interface operations {
                 content?: never;
             };
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Step-up re-authentication required */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
