@@ -22,28 +22,24 @@ pub struct AppConfig {
     pub rp_origin: Url,
     pub cookie_name: String,
     pub cookie_secure: bool,
-    pub dev_mode: bool,
     /// Endpoint override for DynamoDB Local.
     pub dynamodb_endpoint: Option<String>,
+    /// Shared secret CloudFront injects as the `x-origin-verify` header. When
+    /// set, requests lacking a matching value are rejected (origin lock). Unset
+    /// in local dev / tests, where the middleware is a no-op.
+    pub origin_verify_secret: Option<String>,
 }
 
 impl AppConfig {
     pub fn from_env() -> Result<Self, ConfigError> {
         let issuer = env::var("ISSUER").map_err(|_| ConfigError::Missing("ISSUER"))?;
         let table_name = env::var("TABLE_NAME").map_err(|_| ConfigError::Missing("TABLE_NAME"))?;
-        let dev_mode = env::var("DEV_MODE").is_ok_and(|v| v == "1" || v == "true");
-        Self::build(
-            issuer,
-            table_name,
-            dev_mode,
-            env::var("DYNAMODB_ENDPOINT").ok(),
-        )
+        Self::build(issuer, table_name, env::var("DYNAMODB_ENDPOINT").ok())
     }
 
     pub fn build(
         issuer: String,
         table_name: String,
-        dev_mode: bool,
         dynamodb_endpoint: Option<String>,
     ) -> Result<Self, ConfigError> {
         let issuer = issuer.trim_end_matches('/').to_string();
@@ -72,8 +68,8 @@ impl AppConfig {
             rp_origin,
             cookie_name,
             cookie_secure,
-            dev_mode,
             dynamodb_endpoint,
+            origin_verify_secret: env::var("ORIGIN_VERIFY_SECRET").ok(),
         })
     }
 }

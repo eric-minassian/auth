@@ -1,5 +1,5 @@
 //! Integration-test harness: real router + real DynamoDB (testcontainers
-//! DynamoDB Local) + in-process signer + channel-capturing mailer.
+//! DynamoDB Local) + in-process signer.
 //!
 //! Each integration-test binary compiles this module independently, so some
 //! helpers are unused in some binaries; panicking helpers are idiomatic here.
@@ -8,15 +8,17 @@
 pub mod flows;
 
 use auth_service::config::AppConfig;
-use auth_service::email::{EmailMessage, Mailer};
+use auth_service::domain::session::SessionLevel;
 use auth_service::jwt::{LocalSigner, Signer};
 use auth_service::state::AppState;
 use auth_service::store::{Store, schema};
+use axum::http::StatusCode;
+use axum_extra::extract::cookie::Cookie;
 use axum_test::TestServer;
+use uuid::Uuid;
 use testcontainers::ContainerAsync;
 use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::dynamodb_local::DynamoDb;
-use tokio::sync::mpsc::UnboundedReceiver;
 
 // Plain `localhost`: webauthn-authenticator-rs only permits http origins for
 // the literal localhost domain (browsers are more lenient with *.localhost).
@@ -26,7 +28,6 @@ pub struct TestApp {
     pub server: TestServer,
     pub store: Store,
     pub signer: LocalSigner,
-    emails: UnboundedReceiver<EmailMessage>,
     // Held so the container outlives the test.
     _container: ContainerAsync<DynamoDb>,
 }
@@ -58,17 +59,11 @@ impl TestApp {
             .expect("create table");
         let store = Store::new(db, table);
 
-        let cfg = AppConfig::build(ISSUER.to_string(), table.to_string(), false, None)
+        let cfg = AppConfig::build(ISSUER.to_string(), table.to_string(), None)
             .expect("test config");
         let signer = LocalSigner::generate();
-        let (tx, emails) = tokio::sync::mpsc::unbounded_channel();
-        let state = AppState::new(
-            cfg,
-            store.clone(),
-            Signer::Local(signer.clone()),
-            Mailer::Capture(tx),
-        )
-        .expect("app state");
+        let state = AppState::new(cfg, store.clone(), Signer::Local(signer.clone()))
+            .expect("app state");
 
         let server = TestServer::builder()
             .save_cookies()
@@ -78,7 +73,6 @@ impl TestApp {
             server,
             store,
             signer,
-            emails,
             _container: container,
         }
     }
@@ -86,6 +80,23 @@ impl TestApp {
     /// Register an OIDC client for tests.
     pub async fn seed_client(&self, client: &auth_service::domain::oauth::OidcClient) {
         self.store.put_client(client).await.expect("seed client");
+    }
+
+    /// Mint a full (webauthn) session for `user_id` and install its cookie.
+    ///
+    /// The discoverable login *ceremony* can't be driven by the Rust soft
+    /// authenticator — webauthn-authenticator-rs's `SoftPasskey`/`SoftToken`
+    /// reject resident keys, so they can't emulate a discoverable credential.
+    /// That ceremony is covered by the Playwright e2e (CDP virtual
+    /// authenticator, which supports resident keys); Rust tests use this to
+    /// reach an authenticated state for the rest of the API surface.
+    pub async fn login_as(&mut self, user_id: Uuid) {
+        let (sid, _session) = self
+            .store
+            .create_session(user_id, SessionLevel::Full, vec!["webauthn".to_string()])
+            .await
+            .expect("create full session");
+        self.server.add_cookie(Cookie::new("auth_session", sid));
     }
 
     /// POST JSON with the same-origin headers the CSRF middleware requires.
@@ -97,26 +108,21 @@ impl TestApp {
             .json(body)
     }
 
-    /// Most recent captured email for `to`, if any.
-    pub fn last_email_to(&mut self, to: &str) -> Option<EmailMessage> {
-        let mut found = None;
-        while let Ok(msg) = self.emails.try_recv() {
-            if msg.to.eq_ignore_ascii_case(to) {
-                found = Some(msg);
+    /// Fetch a signup proof-of-work challenge and solve it. Returns
+    /// `(challenge, nonce)` to pass to `/api/signup/start`.
+    pub async fn solve_signup_pow(&self) -> (String, String) {
+        let res = self.server.get("/api/signup/pow").await;
+        res.assert_status(StatusCode::OK);
+        let body: serde_json::Value = res.json();
+        let challenge = body["challenge"].as_str().expect("challenge").to_string();
+        let difficulty = body["difficulty"].as_u64().expect("difficulty") as u32;
+        let mut nonce: u64 = 0;
+        loop {
+            let candidate = nonce.to_string();
+            if auth_service::crypto::verify_pow(&challenge, &candidate, difficulty) {
+                return (challenge, candidate);
             }
+            nonce += 1;
         }
-        found
     }
-
-    /// Extract the 6-digit OTP from the most recent email to `to`.
-    pub fn take_otp(&mut self, to: &str) -> String {
-        let email = self.last_email_to(to).expect("an email should be sent");
-        extract_otp(&email.text).expect("email should contain a 6-digit code")
-    }
-}
-
-pub fn extract_otp(text: &str) -> Option<String> {
-    text.split(|c: char| !c.is_ascii_digit())
-        .find(|run| run.len() == 6)
-        .map(str::to_string)
 }

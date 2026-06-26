@@ -14,7 +14,7 @@ use crate::state::AppState;
 #[derive(Serialize, ToSchema)]
 pub struct SessionUser {
     pub user_id: String,
-    pub email: String,
+    pub nickname: String,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -52,7 +52,7 @@ pub async fn get(
     Ok(Json(json!({
         "user": {
             "user_id": user.user_id,
-            "email": user.email,
+            "nickname": user.nickname,
         },
         "session": {
             "created_at": session.created_at,

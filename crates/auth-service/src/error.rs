@@ -3,7 +3,6 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde_json::json;
 
-use crate::email::MailError;
 use crate::jwt::SignError;
 use crate::store::StoreError;
 
@@ -26,8 +25,6 @@ pub enum ApiError {
     #[error("internal error")]
     Store(#[from] StoreError),
     #[error("internal error")]
-    Mail(#[from] MailError),
-    #[error("internal error")]
     Sign(#[from] SignError),
     #[error("internal error")]
     Internal(String),
@@ -42,7 +39,7 @@ impl ApiError {
             Self::NotFound => (StatusCode::NOT_FOUND, "not_found"),
             Self::Conflict { code, .. } => (StatusCode::CONFLICT, code),
             Self::RateLimited => (StatusCode::TOO_MANY_REQUESTS, "rate_limited"),
-            Self::Store(_) | Self::Mail(_) | Self::Sign(_) | Self::Internal(_) => {
+            Self::Store(_) | Self::Sign(_) | Self::Internal(_) => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal_error")
             }
         }

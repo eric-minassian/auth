@@ -31,7 +31,7 @@ async fn bootstrap_with_backchannel(
         allowed_origins: vec![],
         scopes: vec![
             "openid".to_string(),
-            "email".to_string(),
+            "profile".to_string(),
             "offline_access".to_string(),
         ],
     })
@@ -48,7 +48,7 @@ async fn bootstrap_with_backchannel(
         .add_query_param("response_type", "code")
         .add_query_param("client_id", "rp")
         .add_query_param("redirect_uri", RP_CALLBACK)
-        .add_query_param("scope", "openid email offline_access")
+        .add_query_param("scope", "openid profile offline_access")
         .add_query_param("code_challenge", &challenge)
         .add_query_param("code_challenge_method", "S256")
         .await;

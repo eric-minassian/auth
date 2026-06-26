@@ -7,8 +7,8 @@ use crate::error::ApiError;
 use crate::state::AppState;
 use crate::store::now;
 
-/// Any authenticated session (enroll or full). Enroll sessions exist between
-/// OTP verification and first-passkey registration.
+/// Any authenticated session (enroll or full). Enroll sessions come from signup
+/// (a pending account) or recovery-code redemption and may only register passkeys.
 pub struct AnySession(pub IdpSession);
 
 /// A full session (passkey-authenticated). Required by everything except the

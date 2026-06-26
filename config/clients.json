@@ -8,7 +8,7 @@
       "post_logout_redirect_uris": ["https://demo.ericminassian.com/"],
       "backchannel_logout_uri": "https://demo.ericminassian.com/auth/backchannel-logout",
       "allowed_origins": ["https://demo.ericminassian.com"],
-      "scopes": ["openid", "email", "offline_access"]
+      "scopes": ["openid", "profile", "offline_access"]
     },
     {
       "client_id": "website",
@@ -25,7 +25,7 @@
         "https://www.ericminassian.com",
         "http://localhost:4321"
       ],
-      "scopes": ["openid", "email", "offline_access"]
+      "scopes": ["openid", "profile", "offline_access"]
     }
   ]
 }

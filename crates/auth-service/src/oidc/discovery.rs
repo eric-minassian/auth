@@ -29,10 +29,10 @@ pub async fn openid_configuration(State(state): State<AppState>) -> impl IntoRes
             "token_endpoint_auth_methods_supported": ["none"],
             "subject_types_supported": ["public"],
             "id_token_signing_alg_values_supported": ["ES256"],
-            "scopes_supported": ["openid", "email", "offline_access"],
+            "scopes_supported": ["openid", "profile", "offline_access"],
             "claims_supported": [
                 "sub", "iss", "aud", "exp", "iat", "auth_time", "nonce",
-                "sid", "amr", "email", "email_verified"
+                "sid", "amr", "nickname", "updated_at"
             ],
             "backchannel_logout_supported": true,
             "backchannel_logout_session_supported": true,

@@ -1,8 +1,9 @@
-use aws_sdk_dynamodb::types::AttributeValue;
+use aws_sdk_dynamodb::types::{AttributeValue, Put, TransactWriteItem, Update};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use webauthn_rs::prelude::Passkey;
 
+use super::users::user_pk;
 use super::{Store, StoreError, map_sdk_err, n, now, s, schema::GSI1};
 use crate::domain::credential::StoredPasskey;
 
@@ -196,5 +197,69 @@ impl Store {
             .await
             .map_err(map_sdk_err)?;
         Ok(())
+    }
+
+    /// Activate a pending user atomically with its first credential: one
+    /// `TransactWriteItems` that (1) inserts the credential and (2) flips the
+    /// user from Pending to Active (dropping the pending TTL). Either both land
+    /// or neither does — so there is never a usable credential without a usable
+    /// profile, nor an Active account with no way in. Fails (ConditionFailed)
+    /// if the pending row was already activated or GC'd.
+    pub async fn activate_user_with_first_credential(
+        &self,
+        user_id: Uuid,
+        credential_id: &str,
+        passkey: &Passkey,
+        name: &str,
+    ) -> Result<StoredPasskey, StoreError> {
+        let ts = now();
+        let stored = StoredPasskey {
+            credential_id: credential_id.to_string(),
+            user_id,
+            passkey: passkey.clone(),
+            name: name.to_string(),
+            created_at: ts,
+            last_used_at: None,
+        };
+        let cred_item = serde_dynamo::to_item(CredentialItem {
+            pk: cred_pk(credential_id),
+            sk: "CRED".to_string(),
+            gsi1pk: format!("USER#{user_id}"),
+            gsi1sk: format!("CRED#{ts}#{credential_id}"),
+            passkey_json: serde_json::to_string(passkey)
+                .map_err(|e| StoreError::Sdk(e.to_string()))?,
+            credential_id: credential_id.to_string(),
+            user_id,
+            name: name.to_string(),
+            created_at: ts,
+            last_used_at: None,
+        })?;
+        let cred_put = Put::builder()
+            .table_name(&self.table)
+            .set_item(Some(cred_item))
+            .condition_expression("attribute_not_exists(PK)")
+            .build()
+            .map_err(|e| StoreError::Sdk(e.to_string()))?;
+        let activate = Update::builder()
+            .table_name(&self.table)
+            .key("PK", s(user_pk(user_id)))
+            .key("SK", s("PROFILE"))
+            .update_expression("SET #s = :active, updated_at = :ts REMOVE #ttl, expires_at")
+            .condition_expression("attribute_exists(PK) AND #s = :pending")
+            .expression_attribute_names("#s", "status")
+            .expression_attribute_names("#ttl", "ttl")
+            .expression_attribute_values(":active", s("active"))
+            .expression_attribute_values(":pending", s("pending"))
+            .expression_attribute_values(":ts", n(ts))
+            .build()
+            .map_err(|e| StoreError::Sdk(e.to_string()))?;
+        self.db
+            .transact_write_items()
+            .transact_items(TransactWriteItem::builder().put(cred_put).build())
+            .transact_items(TransactWriteItem::builder().update(activate).build())
+            .send()
+            .await
+            .map_err(map_sdk_err)?;
+        Ok(stored)
     }
 }

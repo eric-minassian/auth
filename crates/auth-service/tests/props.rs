@@ -98,3 +98,54 @@ fn local_signer_jws_verifies_against_its_jwk() {
 }
 
 use sha2::Digest;
+
+proptest! {
+    /// Every generated recovery code round-trips through normalization — from
+    /// its canonical form, its dashed display form, and messy lowercase input.
+    /// This is the guard against a valid code being silently rejected on redeem.
+    #[test]
+    fn recovery_code_normalizes_round_trip(_ in 0..64u32) {
+        let code = auth_service::crypto::generate_recovery_code();
+        let canonical = code.canonical.clone();
+        prop_assert_eq!(canonical.len(), 26);
+        prop_assert_eq!(
+            auth_service::crypto::normalize_recovery_code(&code.canonical),
+            Some(canonical.clone())
+        );
+        prop_assert_eq!(
+            auth_service::crypto::normalize_recovery_code(&code.display),
+            Some(canonical.clone())
+        );
+        let messy = format!("  {}  ", code.display.to_lowercase());
+        prop_assert_eq!(
+            auth_service::crypto::normalize_recovery_code(&messy),
+            Some(canonical.clone())
+        );
+    }
+}
+
+#[test]
+fn recovery_code_normalization_rejects_garbage() {
+    use auth_service::crypto::normalize_recovery_code;
+    assert!(normalize_recovery_code("too-short").is_none());
+    // 'U' is excluded from the Crockford alphabet (and is not folded).
+    assert!(normalize_recovery_code(&"U".repeat(26)).is_none());
+}
+
+#[test]
+fn proof_of_work_verifies_only_correct_solutions() {
+    use auth_service::crypto::verify_pow;
+    let challenge = "test-challenge";
+    let difficulty = 8u32;
+    let mut nonce = 0u64;
+    let solution = loop {
+        if verify_pow(challenge, &nonce.to_string(), difficulty) {
+            break nonce.to_string();
+        }
+        nonce += 1;
+    };
+    assert!(verify_pow(challenge, &solution, difficulty));
+    // The same nonce against a different challenge, at a high difficulty, will
+    // not (with overwhelming probability) satisfy the requirement.
+    assert!(!verify_pow("other-challenge", &solution, 28));
+}

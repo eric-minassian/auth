@@ -6,7 +6,7 @@ use serde_json::json;
 use uuid::Uuid;
 
 use super::verify_own_jws;
-use crate::domain::oauth::{SCOPE_EMAIL, scope_contains};
+use crate::domain::oauth::{SCOPE_PROFILE, scope_contains};
 use crate::state::AppState;
 
 /// GET|POST /oauth/userinfo — claims for a Bearer access token.
@@ -51,9 +51,9 @@ pub async fn userinfo(State(state): State<AppState>, headers: HeaderMap) -> Resp
     };
 
     let mut body = json!({ "sub": user.user_id });
-    if scope_contains(&scope, SCOPE_EMAIL) {
-        body["email"] = json!(user.email);
-        body["email_verified"] = json!(user.email_verified);
+    if scope_contains(&scope, SCOPE_PROFILE) {
+        body["nickname"] = json!(user.nickname);
+        body["updated_at"] = json!(user.updated_at);
     }
     (
         [(axum::http::header::CACHE_CONTROL, "no-store")],

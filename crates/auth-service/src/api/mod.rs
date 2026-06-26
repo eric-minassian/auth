@@ -1,5 +1,4 @@
 pub mod account;
-pub mod dev;
 pub mod recovery;
 pub mod session;
 pub mod signup;
@@ -36,6 +35,31 @@ pub fn client_ip(headers: &HeaderMap) -> String {
     }
 
     "unknown".to_string()
+}
+
+/// Rate-limit key derived from the client IP. IPv6 is bucketed to its /64
+/// prefix — a single allocation is 2^64 addresses, so the full address is a
+/// useless key an attacker rotates for free; IPv4 is used as-is.
+pub fn rate_ip_key(headers: &HeaderMap) -> String {
+    let ip = client_ip(headers);
+    match ip.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V6(v6)) => {
+            let seg = v6.segments();
+            format!("{:x}:{:x}:{:x}:{:x}::/64", seg[0], seg[1], seg[2], seg[3])
+        }
+        _ => ip,
+    }
+}
+
+/// Origin ASN as reported by CloudFront (`CloudFront-Viewer-ASN`), if present.
+/// A coarser rate-limit key than IP, since IP-only limiting is defeated by
+/// CGNAT and proxy pools. Trustworthy only behind the CloudFront origin lock
+/// (see [`crate::middleware::origin`]).
+pub fn client_asn(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("cloudfront-viewer-asn")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
 }
 
 /// Generic success envelope (`{ "ok": true }`).

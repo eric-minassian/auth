@@ -1,5 +1,4 @@
 use auth_service::config::AppConfig;
-use auth_service::email::{Mailer, SesMailer};
 use auth_service::jwt::{KmsSigner, LocalSigner, Signer};
 use auth_service::state::AppState;
 use auth_service::store::Store;
@@ -29,12 +28,6 @@ async fn main() -> Result<(), Error> {
         },
     };
 
-    let from_address = std::env::var("EMAIL_FROM").map_err(|_| "EMAIL_FROM not set")?;
-    let mailer = Mailer::Ses(SesMailer::new(
-        aws_sdk_sesv2::Client::new(&aws),
-        from_address,
-    ));
-
-    let state = AppState::new(cfg, store, signer, mailer)?;
+    let state = AppState::new(cfg, store, signer)?;
     lambda_http::run(auth_service::build_router(state)).await
 }

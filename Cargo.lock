@@ -146,7 +146,6 @@ dependencies = [
  "aws-config",
  "aws-sdk-dynamodb",
  "aws-sdk-kms",
- "aws-sdk-sesv2",
  "axum",
  "axum-extra",
  "axum-test",
@@ -180,6 +179,7 @@ dependencies = [
  "uuid",
  "webauthn-authenticator-rs",
  "webauthn-rs",
+ "webauthn-rs-core",
  "wiremock",
 ]
 
@@ -331,31 +331,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "aws-sdk-sesv2"
-version = "1.123.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d159e9d235e4d1089fb4993151e5e6f64fd028c3aae8a55becaee05e56361b63"
-dependencies = [
- "arc-swap",
- "aws-credential-types",
- "aws-runtime",
- "aws-smithy-async",
- "aws-smithy-http",
- "aws-smithy-json",
- "aws-smithy-observability",
- "aws-smithy-runtime",
- "aws-smithy-runtime-api",
- "aws-smithy-types",
- "aws-types",
- "bytes",
- "fastrand",
- "http 0.2.12",
- "http 1.4.2",
- "regex-lite",
- "tracing",
-]
-
-[[package]]
 name = "aws-sdk-sso"
 version = "1.102.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -442,19 +417,15 @@ dependencies = [
  "aws-smithy-runtime-api",
  "aws-smithy-types",
  "bytes",
- "crypto-bigint",
  "form_urlencoded",
  "hex",
  "hmac 0.13.0",
  "http 0.2.12",
  "http 1.4.2",
- "p256",
  "percent-encoding",
  "sha2 0.11.0",
- "subtle",
  "time",
  "tracing",
- "zeroize",
 ]
 
 [[package]]
@@ -1665,8 +1636,6 @@ checksum = "5d7f479d28d1daedf23970890723b8774d120aa627abcb33c1d7c93d0965e6c3"
 dependencies = [
  "compact_str",
  "garde_derive",
- "once_cell",
- "regex",
  "smallvec",
 ]
 
@@ -1678,7 +1647,6 @@ checksum = "7b0252cacdca8e6f30a900e6d436fbf294e23f674b9288ca4a5bd35976bef87c"
 dependencies = [
  "proc-macro2",
  "quote",
- "regex",
  "syn",
 ]
 
