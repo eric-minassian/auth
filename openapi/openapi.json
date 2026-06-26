@@ -173,6 +173,68 @@
         }
       }
     },
+    "/api/account/recovery-codes": {
+      "post": {
+        "tags": [
+          "account"
+        ],
+        "summary": "POST /api/account/recovery-codes — (re)generate the account's recovery\ncodes, returning them exactly once. Requires a recent WebAuthn step-up\n(`/api/webauthn/reauth/*`); a fresh login also counts.",
+        "operationId": "generate_recovery_codes",
+        "responses": {
+          "200": {
+            "description": "Newly generated codes (shown once)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecoveryCodes"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Step-up re-authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/account/recovery-readiness": {
+      "get": {
+        "tags": [
+          "account"
+        ],
+        "summary": "GET /api/account/recovery-readiness — how protected the account is against\ndevice loss (passkey count + remaining recovery codes), for nudging the user\nto add a backup passkey or save recovery codes.",
+        "operationId": "recovery_readiness",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecoveryReadiness"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/account/sessions": {
       "get": {
         "tags": [
@@ -266,59 +328,18 @@
         }
       }
     },
-    "/api/recovery/start": {
+    "/api/recovery/redeem": {
       "post": {
         "tags": [
           "recovery"
         ],
-        "summary": "POST /api/recovery/start — sends a recovery OTP if the account exists.\nUniform 200 either way (anti-enumeration).",
-        "operationId": "start",
+        "summary": "POST /api/recovery/redeem — consume a one-time recovery code and issue an\nenroll-level session so a new passkey can be registered. There is no email\nstep: the code is the sole break-glass credential. On success every existing\nsession and refresh family is revoked (a reset, not an additive grant), so a\nstolen code can't silently coexist with the victim's live sessions. Reaching\na full session still requires a passkey login afterwards.",
+        "operationId": "redeem",
         "requestBody": {
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/StartRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/OkResponse"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Rate limited",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/recovery/verify": {
-      "post": {
-        "tags": [
-          "recovery"
-        ],
-        "summary": "POST /api/recovery/verify — consumes the OTP and issues an enroll-level\nsession on the existing account so a new passkey can be registered.",
-        "operationId": "verify",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/VerifyRequest"
+                "$ref": "#/components/schemas/RedeemRequest"
               }
             }
           },
@@ -330,13 +351,23 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/VerifyResponse"
+                  "$ref": "#/components/schemas/RedeemResponse"
                 }
               }
             }
           },
           "400": {
             "description": "Invalid or expired code",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
             "content": {
               "application/json": {
                 "schema": {
@@ -420,18 +451,18 @@
         }
       }
     },
-    "/api/signup/start": {
+    "/api/signup/finish": {
       "post": {
         "tags": [
           "signup"
         ],
-        "summary": "POST /api/signup/start — sends an OTP (or an \"account exists\" notice).\nUniform 200 regardless of account existence (anti-enumeration).",
-        "operationId": "start",
+        "summary": "POST /api/signup/finish — verify the passkey and activate the account\natomically with its first credential. Deliberately does NOT mint a full\nsession: the client then logs in with the new passkey (`login/finish`) to\nobtain one, so a full session always reflects a real, user-verified\nassertion (and `amr` is honest).",
+        "operationId": "finish",
         "requestBody": {
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/StartRequest"
+                "$ref": "#/components/schemas/FinishRequest"
               }
             }
           },
@@ -439,11 +470,45 @@
         },
         "responses": {
           "200": {
-            "description": "OTP dispatched (uniform regardless of account existence)",
+            "description": "{ user_id, credential_id }"
+          },
+          "400": {
+            "description": "",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/OkResponse"
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/signup/pow": {
+      "get": {
+        "tags": [
+          "signup"
+        ],
+        "summary": "GET /api/signup/pow — issue a one-time proof-of-work challenge the client\nmust solve before `signup/start`. A soft cost on mass automated signup\n(open registration has no email to lean on); not a Sybil/humanness proof.",
+        "operationId": "pow",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PowChallenge"
                 }
               }
             }
@@ -461,18 +526,18 @@
         }
       }
     },
-    "/api/signup/verify": {
+    "/api/signup/start": {
       "post": {
         "tags": [
           "signup"
         ],
-        "summary": "POST /api/signup/verify — consumes the OTP, creates the account, and\nissues an enroll-level session whose only capability is registering the\nfirst passkey.",
-        "operationId": "verify",
+        "summary": "POST /api/signup/start — verify the proof-of-work, create a *pending*\naccount, and begin a passkey registration ceremony. No email, no username:\na nickname plus a passkey is the entire signup. Returns an enroll-level\nsession whose only capability is finishing this registration.",
+        "operationId": "start",
         "requestBody": {
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/VerifyRequest"
+                "$ref": "#/components/schemas/StartRequest"
               }
             }
           },
@@ -480,17 +545,10 @@
         },
         "responses": {
           "200": {
-            "description": "Account created; enroll-level session cookie set",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/VerifyResponse"
-                }
-              }
-            }
+            "description": "{ ceremony_id, user_id, options }; enroll session cookie set"
           },
           "400": {
-            "description": "Invalid or expired code",
+            "description": "Bad nickname or proof of work",
             "content": {
               "application/json": {
                 "schema": {
@@ -499,8 +557,8 @@
               }
             }
           },
-          "409": {
-            "description": "Account already exists",
+          "429": {
+            "description": "Rate limited",
             "content": {
               "application/json": {
                 "schema": {
@@ -517,8 +575,7 @@
         "tags": [
           "webauthn"
         ],
-        "summary": "POST /api/webauthn/login/finish — verifies the assertion and issues a\nfull session.",
-        "description": "Body: `{ ceremony_id, credential }` where `credential` is the\n`navigator.credentials.get()` result. Returns `{ user_id }`.",
+        "summary": "POST /api/webauthn/login/finish — verify the assertion and issue a full\nsession. The asserted credential must belong to an existing, active account,\nand the assertion must be user-verified; only then is `amr=[\"webauthn\"]`\nminted. This is the sole path to a full session.",
         "operationId": "login_finish",
         "requestBody": {
           "content": {
@@ -545,21 +602,61 @@
         "tags": [
           "webauthn"
         ],
-        "summary": "POST /api/webauthn/login/start — no prior auth. Without an email this is\nthe discoverable (conditional-UI) flow; with one, an allowCredentials\nchallenge for that account. Unknown emails get a discoverable challenge\nso the response shape stays uniform.",
-        "description": "Body: `{ email? }`. Returns `{ ceremony_id, options }` for\n`navigator.credentials.get()`.",
+        "summary": "POST /api/webauthn/login/start — begin a usernameless, discoverable login\n(conditional UI / resident keys). Takes no identifier; the authenticator\nreveals which account on `finish`.",
         "operationId": "login_start",
+        "responses": {
+          "200": {
+            "description": "{ ceremony_id, options }"
+          }
+        }
+      }
+    },
+    "/api/webauthn/reauth/finish": {
+      "post": {
+        "tags": [
+          "webauthn"
+        ],
+        "summary": "POST /api/webauthn/reauth/finish — verify the step-up assertion and stamp\n`reauth_at` on the current session. No new session is minted.",
+        "operationId": "reauth_finish",
         "requestBody": {
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/LoginStartRequest"
+                "$ref": "#/components/schemas/ReauthFinishRequest"
               }
             }
-          }
+          },
+          "required": true
         },
         "responses": {
           "200": {
+            "description": "{ ok: true }"
+          },
+          "401": {
+            "description": ""
+          },
+          "403": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/webauthn/reauth/start": {
+      "post": {
+        "tags": [
+          "webauthn"
+        ],
+        "summary": "POST /api/webauthn/reauth/start — begin a step-up assertion on the current\nfull session (we know the user, so allowCredentials is scoped to their\npasskeys). Used to gate sensitive operations like generating recovery codes.",
+        "operationId": "reauth_start",
+        "responses": {
+          "200": {
             "description": "{ ceremony_id, options }"
+          },
+          "400": {
+            "description": ""
+          },
+          "403": {
+            "description": ""
           }
         }
       }
@@ -569,8 +666,7 @@
         "tags": [
           "webauthn"
         ],
-        "summary": "POST /api/webauthn/register/finish — stores the passkey; upgrades an\nenroll session to full when it was the first registration step.",
-        "description": "Body: `{ ceremony_id, credential, name? }` where `credential` is the\n`navigator.credentials.create()` result.",
+        "summary": "POST /api/webauthn/register/finish — store the passkey. Never elevates the\nsession: `Full` is reachable only via `login/finish`, so registering a\npasskey (including during recovery) never by itself grants a full session.",
         "operationId": "register_finish",
         "requestBody": {
           "content": {
@@ -591,6 +687,9 @@
           },
           "403": {
             "description": ""
+          },
+          "409": {
+            "description": "Step-up re-authentication required"
           }
         }
       }
@@ -600,8 +699,7 @@
         "tags": [
           "webauthn"
         ],
-        "summary": "POST /api/webauthn/register/start — enroll or full session.",
-        "description": "Returns `{ ceremony_id, options }` where `options` is the raw\n`PublicKeyCredentialCreationOptions` to pass to `navigator.credentials\n.create()`. The shape is the standard WebAuthn structure (not modeled in\nthis schema).",
+        "summary": "POST /api/webauthn/register/start — add a passkey to the current account\n(enroll or full session). Used to add backup passkeys, and to register a new\npasskey during recovery. Signup uses its own ceremony (`/api/signup/*`).",
         "operationId": "register_start",
         "responses": {
           "200": {
@@ -609,6 +707,9 @@
           },
           "401": {
             "description": ""
+          },
+          "409": {
+            "description": "Step-up re-authentication required"
           }
         }
       }
@@ -667,6 +768,28 @@
           }
         }
       },
+      "FinishRequest": {
+        "type": "object",
+        "required": [
+          "ceremony_id",
+          "credential"
+        ],
+        "properties": {
+          "ceremony_id": {
+            "type": "string"
+          },
+          "credential": {
+            "type": "object",
+            "description": "Raw `navigator.credentials.create()` result (standard WebAuthn shape)."
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
       "HealthResponse": {
         "type": "object",
         "required": [
@@ -695,17 +818,6 @@
           "credential": {
             "type": "object",
             "description": "Raw `navigator.credentials.get()` result (standard WebAuthn shape)."
-          }
-        }
-      },
-      "LoginStartRequest": {
-        "type": "object",
-        "properties": {
-          "email": {
-            "type": [
-              "string",
-              "null"
-            ]
           }
         }
       },
@@ -759,6 +871,94 @@
             "items": {
               "$ref": "#/components/schemas/PasskeyInfo"
             }
+          }
+        }
+      },
+      "PowChallenge": {
+        "type": "object",
+        "required": [
+          "challenge",
+          "difficulty"
+        ],
+        "properties": {
+          "challenge": {
+            "type": "string"
+          },
+          "difficulty": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        }
+      },
+      "ReauthFinishRequest": {
+        "type": "object",
+        "required": [
+          "ceremony_id",
+          "credential"
+        ],
+        "properties": {
+          "ceremony_id": {
+            "type": "string"
+          },
+          "credential": {
+            "type": "object",
+            "description": "Raw `navigator.credentials.get()` result (standard WebAuthn shape)."
+          }
+        }
+      },
+      "RecoveryCodes": {
+        "type": "object",
+        "required": [
+          "codes"
+        ],
+        "properties": {
+          "codes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "RecoveryReadiness": {
+        "type": "object",
+        "required": [
+          "passkey_count",
+          "recovery_codes_remaining"
+        ],
+        "properties": {
+          "passkey_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "recovery_codes_remaining": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "RedeemRequest": {
+        "type": "object",
+        "required": [
+          "code"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "A recovery code, in any reasonable casing/grouping (normalized server-side)."
+          }
+        }
+      },
+      "RedeemResponse": {
+        "type": "object",
+        "required": [
+          "user_id"
+        ],
+        "properties": {
+          "user_id": {
+            "type": "string",
+            "format": "uuid"
           }
         }
       },
@@ -879,10 +1079,10 @@
         "type": "object",
         "required": [
           "user_id",
-          "email"
+          "nickname"
         ],
         "properties": {
-          "email": {
+          "nickname": {
             "type": "string"
           },
           "user_id": {
@@ -893,11 +1093,22 @@
       "StartRequest": {
         "type": "object",
         "required": [
-          "email"
+          "nickname",
+          "pow_challenge",
+          "pow_nonce"
         ],
         "properties": {
-          "email": {
-            "type": "string"
+          "nickname": {
+            "type": "string",
+            "description": "User-chosen display nickname (non-unique, sanitized server-side)."
+          },
+          "pow_challenge": {
+            "type": "string",
+            "description": "The challenge string from `GET /api/signup/pow`."
+          },
+          "pow_nonce": {
+            "type": "string",
+            "description": "A nonce such that `SHA-256(\"{challenge}:{nonce}\")` meets the difficulty."
           }
         }
       },
@@ -977,33 +1188,6 @@
             "type": "string"
           }
         }
-      },
-      "VerifyRequest": {
-        "type": "object",
-        "required": [
-          "email",
-          "code"
-        ],
-        "properties": {
-          "code": {
-            "type": "string"
-          },
-          "email": {
-            "type": "string"
-          }
-        }
-      },
-      "VerifyResponse": {
-        "type": "object",
-        "required": [
-          "user_id"
-        ],
-        "properties": {
-          "user_id": {
-            "type": "string",
-            "format": "uuid"
-          }
-        }
       }
     }
   },
@@ -1014,15 +1198,15 @@
     },
     {
       "name": "signup",
-      "description": "Account creation (email OTP)"
+      "description": "Account creation (passkey + proof-of-work)"
     },
     {
       "name": "recovery",
-      "description": "Account recovery (email OTP)"
+      "description": "Account recovery (one-time recovery codes)"
     },
     {
       "name": "webauthn",
-      "description": "Passkey registration and login"
+      "description": "Passkey registration, login, and step-up"
     },
     {
       "name": "session",
@@ -1030,7 +1214,7 @@
     },
     {
       "name": "account",
-      "description": "Passkey and session management"
+      "description": "Passkey, session, and recovery-code management"
     },
     {
       "name": "oidc",
