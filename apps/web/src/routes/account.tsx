@@ -32,8 +32,20 @@ import { createRoute, redirect, useNavigate } from "@tanstack/react-router";
 import { toast } from "sonner";
 import { useCallback, useEffect, useState } from "react";
 
-import { api, ApiError, type PasskeyInfo, type SessionInfo, type SessionListItem } from "../lib/api.js";
-import { registerPasskey } from "../lib/webauthn.js";
+import {
+  api,
+  ApiError,
+  type PasskeyInfo,
+  type RecoveryReadiness,
+  type SessionInfo,
+  type SessionListItem,
+} from "../lib/api.js";
+import {
+  generateRecoveryCodes,
+  getRecoveryReadiness,
+  registerPasskey,
+  withStepUp,
+} from "../lib/webauthn.js";
 import { rootRoute } from "./root.js";
 
 function formatDate(epochSeconds: number): string {
@@ -45,17 +57,22 @@ function Account() {
   const [session, setSession] = useState<SessionInfo>();
   const [passkeys, setPasskeys] = useState<PasskeyInfo[]>();
   const [sessions, setSessions] = useState<SessionListItem[]>();
+  const [readiness, setReadiness] = useState<RecoveryReadiness>();
+  // Newly generated recovery codes, shown exactly once.
+  const [newCodes, setNewCodes] = useState<string[]>();
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
-    const [s, p, sess] = await Promise.all([
+    const [s, p, sess, r] = await Promise.all([
       api.get<SessionInfo>("/api/session"),
       api.get<{ passkeys: PasskeyInfo[] }>("/api/account/passkeys"),
       api.get<{ sessions: SessionListItem[] }>("/api/account/sessions"),
+      getRecoveryReadiness(),
     ]);
     setSession(s);
     setPasskeys(p.passkeys);
     setSessions(sess.sessions);
+    setReadiness(r);
   }, []);
 
   useEffect(() => {
@@ -65,11 +82,25 @@ function Account() {
   async function addPasskey() {
     setBusy(true);
     try {
-      await registerPasskey();
+      // Adding a passkey from a non-fresh session requires a step-up assertion.
+      await withStepUp(() => registerPasskey());
       toast.success("Passkey added");
       await load();
     } catch {
       toast.error("Could not add a passkey");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function generateCodes() {
+    setBusy(true);
+    try {
+      const codes = await generateRecoveryCodes();
+      setNewCodes(codes);
+      await load();
+    } catch {
+      toast.error("Could not generate recovery codes");
     } finally {
       setBusy(false);
     }
@@ -101,12 +132,15 @@ function Account() {
     navigate({ to: "/sign-in" });
   }
 
+  const onlyOnePasskey = (readiness?.passkey_count ?? 0) < 2;
+  const noRecoveryCodes = (readiness?.recovery_codes_remaining ?? 0) === 0;
+
   return (
     <div className="flex w-full max-w-xl flex-col gap-6 py-8">
       <header>
         <h1 className="text-2xl font-semibold">Account</h1>
         {session ? (
-          <p className="text-muted-foreground text-sm">{session.user.email}</p>
+          <p className="text-muted-foreground text-sm">{session.user.nickname}</p>
         ) : (
           <Skeleton className="mt-1 h-4 w-40" />
         )}
@@ -123,6 +157,11 @@ function Account() {
           </Button>
         </CardHeader>
         <CardContent>
+          {onlyOnePasskey && passkeys !== undefined ? (
+            <p className="text-muted-foreground mb-3 text-sm">
+              Add a second passkey (e.g. on another device) so losing one never locks you out.
+            </p>
+          ) : null}
           {passkeys === undefined ? (
             <Skeleton className="h-16 w-full" />
           ) : passkeys.length === 0 ? (
@@ -154,6 +193,56 @@ function Account() {
                 </Item>
               ))}
             </ItemGroup>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader className="flex-row items-center justify-between">
+          <div>
+            <CardTitle>Recovery codes</CardTitle>
+            <CardDescription>
+              Your only way back in if you lose every passkey. There is no email reset.
+            </CardDescription>
+          </div>
+          <Button size="sm" variant={noRecoveryCodes ? "default" : "outline"} onClick={generateCodes} disabled={busy}>
+            {readiness && readiness.recovery_codes_remaining > 0 ? "Regenerate" : "Generate"}
+          </Button>
+        </CardHeader>
+        <CardContent>
+          {newCodes ? (
+            <div className="flex flex-col gap-3">
+              <p className="text-sm font-medium">
+                Save these now — they're shown only once and replace any previous codes.
+              </p>
+              <pre className="bg-muted overflow-x-auto rounded-md p-3 font-mono text-sm leading-6">
+                {newCodes.join("\n")}
+              </pre>
+              <div className="flex gap-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => {
+                    void navigator.clipboard
+                      .writeText(newCodes.join("\n"))
+                      .then(() => toast.success("Copied"));
+                  }}
+                >
+                  Copy
+                </Button>
+                <Button size="sm" onClick={() => setNewCodes(undefined)}>
+                  I've saved them
+                </Button>
+              </div>
+            </div>
+          ) : readiness === undefined ? (
+            <Skeleton className="h-6 w-48" />
+          ) : (
+            <p className="text-muted-foreground text-sm">
+              {readiness.recovery_codes_remaining > 0
+                ? `${readiness.recovery_codes_remaining} unused recovery code${readiness.recovery_codes_remaining === 1 ? "" : "s"} remaining.`
+                : "You have no recovery codes. Generate a set and store them somewhere safe."}
+            </p>
           )}
         </CardContent>
       </Card>

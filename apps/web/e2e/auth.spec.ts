@@ -1,89 +1,111 @@
 import { expect, test, type CDPSession, type Page } from "@playwright/test";
 
+const VIRTUAL_AUTH_OPTIONS = {
+  protocol: "ctap2",
+  transport: "internal",
+  hasResidentKey: true,
+  hasUserVerification: true,
+  isUserVerified: true,
+  automaticPresenceSimulation: true,
+} as const;
+
 /**
  * Installs a CDP virtual WebAuthn authenticator with resident-key + user
- * verification support, so passkey ceremonies complete without real hardware.
+ * verification support, so passkey ceremonies (including usernameless
+ * discoverable login) complete without real hardware. Returns the CDP session
+ * and the authenticator id (so a test can swap in a "new device").
  */
-async function addVirtualAuthenticator(page: Page): Promise<CDPSession> {
+async function addVirtualAuthenticator(
+  page: Page,
+): Promise<{ client: CDPSession; authenticatorId: string }> {
   const client = await page.context().newCDPSession(page);
   await client.send("WebAuthn.enable");
-  await client.send("WebAuthn.addVirtualAuthenticator", {
-    options: {
-      protocol: "ctap2",
-      transport: "internal",
-      hasResidentKey: true,
-      hasUserVerification: true,
-      isUserVerified: true,
-      automaticPresenceSimulation: true,
-    },
+  const { authenticatorId } = await client.send("WebAuthn.addVirtualAuthenticator", {
+    options: VIRTUAL_AUTH_OPTIONS,
   });
-  return client;
+  return { client, authenticatorId };
 }
 
-/** Reads the OTP the dev API "emailed", retrying until it lands. */
-async function fetchOtp(page: Page, email: string): Promise<string> {
-  for (let attempt = 0; attempt < 20; attempt++) {
-    const response = await page.request.get(
-      `/api/dev/last-otp?email=${encodeURIComponent(email)}`,
-    );
-    if (response.ok()) {
-      return ((await response.json()) as { code: string }).code;
-    }
-    await page.waitForTimeout(250);
-  }
-  throw new Error(`no OTP delivered for ${email}`);
+function uniqueNickname(): string {
+  return `e2e-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
 }
 
-function uniqueEmail(): string {
-  return `e2e-${Date.now()}-${Math.floor(Math.random() * 1e6)}@example.com`;
-}
-
-/** Drives the sign-up flow to the account page. */
-async function signUp(page: Page, email: string): Promise<void> {
+/** Drives the passkey sign-up flow (proof-of-work + passkey) to the account page. */
+async function signUp(page: Page, nickname: string): Promise<void> {
   await page.goto("/sign-up");
-  await page.getByLabel("Email").fill(email);
-  await page.getByRole("button", { name: "Send code" }).click();
-
-  // The OTP step only renders once the start request resolves.
-  await expect(page.getByText(/Enter the 6-digit code/)).toBeVisible();
-  const code = await fetchOtp(page, email);
-  await page.locator('input[autocomplete="one-time-code"]').first().fill(code);
-  await page.getByRole("button", { name: "Verify" }).click();
-
-  await page.getByRole("button", { name: "Create passkey" }).click();
-  await expect(page).toHaveURL(/\/account$/);
+  await page.getByLabel("Display name").fill(nickname);
+  await page.getByRole("button", { name: /Create account/ }).click();
+  // Allow time for the proof-of-work solve plus two passkey ceremonies.
+  await expect(page).toHaveURL(/\/account$/, { timeout: 30_000 });
 }
 
-test("sign up with email OTP + passkey, then sign out and back in", async ({ page }) => {
+test("sign up with a passkey, then sign out and back in", async ({ page }) => {
   await addVirtualAuthenticator(page);
-  const email = uniqueEmail();
+  const nickname = uniqueNickname();
 
-  await signUp(page, email);
-  await expect(page.getByText(email)).toBeVisible();
-  await expect(page.getByText("Passkey", { exact: true })).toBeVisible();
+  await signUp(page, nickname);
+  await expect(page.getByText(nickname)).toBeVisible();
 
   // --- Sign out ---
   await page.getByRole("button", { name: "Sign out" }).click();
   await expect(page).toHaveURL(/\/sign-in$/);
 
-  // --- Sign back in with the passkey ---
-  await page.getByLabel("Email").fill(email);
-  await page.getByRole("button", { name: "Sign in with passkey" }).click();
-  await expect(page).toHaveURL(/\/account$/);
-  await expect(page.getByText(email)).toBeVisible();
+  // --- Sign back in with the discoverable passkey (no identifier). The
+  // conditional-UI autofill can auto-complete with the virtual authenticator;
+  // otherwise the explicit button drives it. Either way we reach /account. ---
+  await page
+    .getByRole("button", { name: /Sign in with a passkey/ })
+    .click({ timeout: 5000 })
+    .catch(() => {
+      /* conditional UI already signed us in — the button is gone */
+    });
+  await expect(page).toHaveURL(/\/account$/, { timeout: 30_000 });
+  await expect(page.getByText(nickname)).toBeVisible();
+});
+
+test("generate recovery codes, then recover the account with one", async ({ page }) => {
+  const { client, authenticatorId } = await addVirtualAuthenticator(page);
+  const nickname = uniqueNickname();
+  await signUp(page, nickname);
+
+  // Generate recovery codes — the fresh login satisfies the step-up.
+  await page.getByRole("button", { name: /^Generate$/ }).click();
+  const codesBlock = page.locator("pre");
+  await expect(codesBlock).toBeVisible();
+  const codes = (await codesBlock.innerText())
+    .trim()
+    .split("\n")
+    .map((c) => c.trim())
+    .filter(Boolean);
+  expect(codes.length).toBe(10);
+  await page.getByRole("button", { name: /saved them/ }).click();
+
+  // Sign out, then simulate recovering on a NEW device: drop the authenticator
+  // holding the original passkey and attach a fresh one (otherwise registering
+  // the recovery passkey hits excludeCredentials → InvalidStateError).
+  await page.getByRole("button", { name: "Sign out" }).click();
+  // Immediately drop the authenticator (this also disarms any conditional-UI
+  // auto-login) and attach a fresh one, simulating recovery on a new device.
+  await client.send("WebAuthn.removeVirtualAuthenticator", { authenticatorId });
+  await client.send("WebAuthn.addVirtualAuthenticator", { options: VIRTUAL_AUTH_OPTIONS });
+
+  await page.goto("/recover");
+  const [firstCode = ""] = codes;
+  await page.getByLabel("Recovery code").fill(firstCode);
+  await page.getByRole("button", { name: /Recover/ }).click();
+  await expect(page).toHaveURL(/\/account$/, { timeout: 30_000 });
 });
 
 test("OIDC authorize returns a code to the RP when signed in", async ({ page }) => {
   await addVirtualAuthenticator(page);
-  const email = uniqueEmail();
-  await signUp(page, email);
+  await signUp(page, uniqueNickname());
 
   // Hitting authorize while signed in returns a code to the dev RP callback.
   const params = new URLSearchParams({
     response_type: "code",
     client_id: "dev",
     redirect_uri: "http://localhost:5174/callback",
-    scope: "openid email",
+    scope: "openid profile",
     // S256 challenge of a fixed verifier (its value is irrelevant here).
     code_challenge: "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
     code_challenge_method: "S256",

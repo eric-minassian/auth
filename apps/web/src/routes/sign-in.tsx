@@ -1,9 +1,7 @@
 import { Alert, AlertDescription } from "@eric-minassian/design/components/alert";
 import { Button } from "@eric-minassian/design/components/button";
-import { Field, FieldLabel } from "@eric-minassian/design/components/field";
-import { Input } from "@eric-minassian/design/components/input";
 import { Spinner } from "@eric-minassian/design/components/spinner";
-import { createRoute, Link } from "@tanstack/react-router";
+import { Link, createRoute } from "@tanstack/react-router";
 import { useEffect, useRef, useState } from "react";
 
 import { AuthCard } from "../components/AuthCard.js";
@@ -17,7 +15,6 @@ interface SignInSearch {
 
 function SignIn() {
   const { return_to } = signInRoute.useSearch();
-  const [email, setEmail] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | undefined>();
   // Holds the in-flight conditional-UI ceremony so the explicit button can
@@ -50,10 +47,10 @@ function SignIn() {
     // Cancel the pending conditional ceremony before starting an explicit one.
     conditional.current?.abort();
     try {
-      await loginWithPasskey(email ? { email } : {});
+      await loginWithPasskey();
       resumeAfterLogin(return_to);
     } catch {
-      setError("Sign-in failed. Try again, or use a different passkey.");
+      setError("Sign-in failed. Try again, or recover your account.");
       setBusy(false);
     }
   }
@@ -61,10 +58,13 @@ function SignIn() {
   return (
     <AuthCard
       title="Sign in"
-      description="Use your passkey to continue."
+      description="Use your passkey to continue — no email, no password."
       footer={
         <>
-          No account? <Link to="/sign-up" className="text-primary underline">Create one</Link>
+          No account?{" "}
+          <Link to="/sign-up" className="text-primary underline">
+            Create one
+          </Link>
         </>
       }
     >
@@ -73,20 +73,9 @@ function SignIn() {
           <AlertDescription>{error}</AlertDescription>
         </Alert>
       ) : null}
-      <Field>
-        <FieldLabel htmlFor="email">Email</FieldLabel>
-        <Input
-          id="email"
-          type="email"
-          autoComplete="username webauthn"
-          placeholder="you@example.com"
-          value={email}
-          onChange={(e) => setEmail(e.target.value)}
-        />
-      </Field>
       <Button onClick={signIn} disabled={busy}>
         {busy ? <Spinner /> : null}
-        Sign in with passkey
+        Sign in with a passkey
       </Button>
       <Link to="/recover" className="text-muted-foreground text-center text-sm underline">
         Lost access to your passkey?
