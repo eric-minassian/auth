@@ -1,5 +1,12 @@
 # Security review — 2026-06-12
 
+> **Note — superseded in part by the email-free migration.** This review predates
+> the removal of email/SES. Entries that reference email-OTP signup/recovery or the
+> enroll→full session *upgrade* no longer apply: recovery is now one-time recovery
+> codes, signup is passkey + proof-of-work, and a Full session is minted **only** by
+> `login/finish` (registering a passkey never elevates). See `CLAUDE.md` and
+> `docs/oidc-integration.md`.
+
 A multi-agent adversarial review (5 dimension finders → independent skeptic per
 finding) surfaced 35 candidate issues; 14 were refuted as false positives, 21
 confirmed. Two were **high** severity and are fixed; the rest were low/medium
