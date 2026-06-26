@@ -63,6 +63,8 @@ async fn get_code(app: &TestApp, pkce: &Pkce, state_param: &str, nonce: &str) ->
     assert!(url.as_str().starts_with(RP_CALLBACK), "redirects to the RP");
     let query: std::collections::HashMap<_, _> = url.query_pairs().collect();
     assert_eq!(query.get("state").map(AsRef::as_ref), Some(state_param));
+    // RFC 9207: every authorization response carries the issuer.
+    assert_eq!(query.get("iss").map(AsRef::as_ref), Some(harness::ISSUER));
     query.get("code").expect("code param").to_string()
 }
 
@@ -80,6 +82,15 @@ async fn discovery_and_jwks_are_served() {
     );
     assert_eq!(doc["code_challenge_methods_supported"][0], "S256");
     assert_eq!(doc["frontchannel_logout_supported"], false);
+    assert_eq!(doc["authorization_response_iss_parameter_supported"], true);
+    assert_eq!(doc["revocation_endpoint_auth_methods_supported"][0], "none");
+    assert_eq!(doc["dpop_signing_alg_values_supported"][0], "ES256");
+    assert!(
+        doc["prompt_values_supported"]
+            .as_array()
+            .is_some_and(|v| v.iter().any(|p| p == "create")),
+        "prompt=create advertised"
+    );
 
     let res = app.server.get("/.well-known/jwks.json").await;
     res.assert_status(StatusCode::OK);
@@ -230,6 +241,88 @@ async fn authorize_without_session_redirects_to_sign_in() {
     assert!(location.starts_with(RP_CALLBACK));
     assert!(location.contains("error=login_required"));
     assert!(location.contains("state=st"));
+}
+
+#[tokio::test]
+async fn prompt_create_routes_to_signup_and_8414_alias_serves_metadata() {
+    let app = TestApp::spawn().await;
+    app.seed_client(&rp_client()).await;
+    let pkce = pkce();
+
+    // prompt=create sends an unauthenticated browser to the signup entry.
+    let res = app
+        .server
+        .get("/oauth/authorize")
+        .add_query_param("response_type", "code")
+        .add_query_param("client_id", "rp")
+        .add_query_param("redirect_uri", RP_CALLBACK)
+        .add_query_param("scope", "openid")
+        .add_query_param("code_challenge", &pkce.challenge)
+        .add_query_param("code_challenge_method", "S256")
+        .add_query_param("prompt", "create")
+        .await;
+    let location = res.header("location").to_str().expect("loc").to_string();
+    assert!(
+        location.starts_with(&format!("{}/sign-up?return_to=", harness::ISSUER)),
+        "prompt=create should land on signup: {location}"
+    );
+
+    // prompt=none combined with another value is invalid_request (to the RP).
+    let res = app
+        .server
+        .get("/oauth/authorize")
+        .add_query_param("response_type", "code")
+        .add_query_param("client_id", "rp")
+        .add_query_param("redirect_uri", RP_CALLBACK)
+        .add_query_param("scope", "openid")
+        .add_query_param("code_challenge", &pkce.challenge)
+        .add_query_param("code_challenge_method", "S256")
+        .add_query_param("prompt", "none login")
+        .add_query_param("state", "s")
+        .await;
+    let location = res.header("location").to_str().expect("loc").to_string();
+    assert!(location.starts_with(RP_CALLBACK) && location.contains("error=invalid_request"));
+
+    // RFC 8414 alias serves the same document as the OIDC discovery path.
+    let res = app
+        .server
+        .get("/.well-known/oauth-authorization-server")
+        .await;
+    res.assert_status(StatusCode::OK);
+    let doc: serde_json::Value = res.json();
+    assert_eq!(doc["issuer"], harness::ISSUER);
+}
+
+#[tokio::test]
+async fn fresh_login_satisfies_prompt_login_and_max_age_zero() {
+    let mut app = TestApp::spawn().await;
+    app.seed_client(&rp_client()).await;
+    let mut authenticator = flows::new_authenticator();
+    flows::signup_with_passkey(&mut app, "fresh@example.com", &mut authenticator).await;
+
+    // A just-completed login is fresh enough for the strictest controls, so
+    // authorize issues a code rather than looping back to sign-in (the grace
+    // floor absorbs the redirect round-trip).
+    for (key, value) in [("prompt", "login"), ("max_age", "0")] {
+        let pkce = pkce();
+        let res = app
+            .server
+            .get("/oauth/authorize")
+            .add_query_param("response_type", "code")
+            .add_query_param("client_id", "rp")
+            .add_query_param("redirect_uri", RP_CALLBACK)
+            .add_query_param("scope", "openid")
+            .add_query_param("code_challenge", &pkce.challenge)
+            .add_query_param("code_challenge_method", "S256")
+            .add_query_param(key, value)
+            .await;
+        res.assert_status(StatusCode::SEE_OTHER);
+        let location = res.header("location").to_str().expect("loc").to_string();
+        assert!(
+            location.starts_with(RP_CALLBACK) && location.contains("code="),
+            "{key}={value} should issue a code to a freshly-logged-in user: {location}"
+        );
+    }
 }
 
 #[tokio::test]

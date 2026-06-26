@@ -6,11 +6,23 @@
  * JSON form (`{ publicKey: … }`), so the native `parse*OptionsFromJSON` / `toJSON`
  * helpers handle conversion with no extra dependency.
  */
+import aaguidNames from "./aaguid.json";
 import { ApiError, api, type RecoveryReadiness } from "./api.js";
 
 interface CeremonyEnvelope {
   ceremony_id: string;
   options: { publicKey: unknown };
+}
+
+export interface RegistrationResult {
+  /**
+   * credProps.rk — `false` means the authenticator did NOT store a
+   * discoverable (resident) credential, so it can't be used for this
+   * provider's usernameless login (a permanent-lockout footgun for a hardware
+   * key with exhausted resident-key slots). `undefined` when the browser
+   * omits the extension; platform authenticators report `true`.
+   */
+  discoverable: boolean | undefined;
 }
 
 export function isWebauthnSupported(): boolean {
@@ -69,7 +81,7 @@ interface SignupStart {
  * activate it. This leaves an *enroll* session — call {@link loginWithPasskey}
  * afterwards to obtain a full session.
  */
-export async function signUp(nickname: string, passkeyName?: string): Promise<void> {
+export async function signUp(nickname: string, passkeyName?: string): Promise<RegistrationResult> {
   const pow = await api.get<PowChallenge>("/api/signup/pow");
   const powNonce = await solvePow(pow);
   const start = await api.post<SignupStart>("/api/signup/start", {
@@ -87,14 +99,15 @@ export async function signUp(nickname: string, passkeyName?: string): Promise<vo
   await api.post("/api/signup/finish", {
     ceremony_id: start.ceremony_id,
     credential: credential.toJSON(),
-    name: passkeyName,
+    name: passkeyName ?? defaultPasskeyName(credential),
   });
+  return { discoverable: credentialDiscoverable(credential) };
 }
 
 // ---- Passkey registration (add a passkey / re-onboard after recovery) ------
 
 /** Register a passkey for the current (enroll or full) session. */
-export async function registerPasskey(name?: string): Promise<void> {
+export async function registerPasskey(name?: string): Promise<RegistrationResult> {
   const start = await api.post<CeremonyEnvelope>("/api/webauthn/register/start");
   const options = PublicKeyCredential.parseCreationOptionsFromJSON(
     start.options.publicKey as PublicKeyCredentialCreationOptionsJSON,
@@ -106,8 +119,9 @@ export async function registerPasskey(name?: string): Promise<void> {
   await api.post("/api/webauthn/register/finish", {
     ceremony_id: start.ceremony_id,
     credential: credential.toJSON(),
-    name,
+    name: name ?? defaultPasskeyName(credential),
   });
+  return { discoverable: credentialDiscoverable(credential) };
 }
 
 // ---- Login (usernameless, discoverable) ------------------------------------
@@ -185,4 +199,82 @@ export async function generateRecoveryCodes(): Promise<string[]> {
 
 export function getRecoveryReadiness(): Promise<RecoveryReadiness> {
   return api.get<RecoveryReadiness>("/api/account/recovery-readiness");
+}
+
+// ---- Authenticator metadata & client-manager sync --------------------------
+
+const AAGUID_NAMES = aaguidNames as Record<string, string>;
+
+/** credProps.rk: did the authenticator store a discoverable credential? */
+function credentialDiscoverable(credential: PublicKeyCredential): boolean | undefined {
+  return credential.getClientExtensionResults().credProps?.rk;
+}
+
+/** A default passkey label from the authenticator's AAGUID, when recognizable. */
+function defaultPasskeyName(credential: PublicKeyCredential): string | undefined {
+  const aaguid = parseAaguid(credential);
+  return aaguid ? AAGUID_NAMES[aaguid] : undefined;
+}
+
+/** Extract the AAGUID (bytes 37–53 of authData) from a registration response. */
+function parseAaguid(credential: PublicKeyCredential): string | undefined {
+  const response = credential.response;
+  if (
+    !(response instanceof AuthenticatorAttestationResponse) ||
+    typeof response.getAuthenticatorData !== "function"
+  ) {
+    return undefined;
+  }
+  const authData = new Uint8Array(response.getAuthenticatorData());
+  if (authData.length < 53) return undefined;
+  const bytes = authData.slice(37, 53);
+  // All-zero AAGUID (attestation=none privacy default) carries no provider info.
+  if (bytes.every((b) => b === 0)) return undefined;
+  const hex = [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+interface SignalCapableStatic {
+  signalAllAcceptedCredentials?: (options: {
+    rpId: string;
+    userId: string;
+    allAcceptedCredentialIds: string[];
+  }) => Promise<void>;
+}
+
+/**
+ * Best-effort WebAuthn Signal API (WebAuthn L3): tell the platform passkey
+ * manager the COMPLETE set of credential ids this account still accepts, so it
+ * can prune ghost entries for passkeys deleted server-side. Must always be the
+ * full valid list — a partial list can make the manager drop live passkeys —
+ * and only mutates the calling device. Silently no-ops where unsupported.
+ */
+export async function signalAcceptedCredentials(
+  userIdUuid: string,
+  credentialIds: string[],
+): Promise<void> {
+  const pk = (
+    typeof PublicKeyCredential !== "undefined" ? PublicKeyCredential : undefined
+  ) as (typeof PublicKeyCredential & SignalCapableStatic) | undefined;
+  if (!pk || typeof pk.signalAllAcceptedCredentials !== "function") return;
+  try {
+    await pk.signalAllAcceptedCredentials({
+      rpId: window.location.hostname,
+      // The user handle is the raw 16-byte UUID, base64url-encoded.
+      userId: uuidToBase64url(userIdUuid),
+      allAcceptedCredentialIds: credentialIds,
+    });
+  } catch {
+    // Purely advisory; never block the UI on a sync hint.
+  }
+}
+
+function uuidToBase64url(uuid: string): string {
+  const hex = uuid.replace(/-/g, "");
+  if (hex.length !== 32) return "";
+  const bytes = new Uint8Array(16);
+  for (let i = 0; i < 16; i++) bytes[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }

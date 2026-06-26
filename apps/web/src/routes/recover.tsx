@@ -23,8 +23,16 @@ function Recover() {
     try {
       await redeemRecoveryCode(code.trim());
       // Recovery grants an enroll session: register a fresh passkey, then log in.
-      await registerPasskey();
+      const { discoverable } = await registerPasskey();
+      if (discoverable === false) {
+        throw new Error(
+          "This device couldn't store a sign-in-ready passkey. Try a platform authenticator and recover again.",
+        );
+      }
       await loginWithPasskey();
+      // Signal the account page to issue replacement codes immediately — the
+      // user has just completed a user-verifying assertion.
+      sessionStorage.setItem("ema_post_recovery", "1");
       void navigate({ to: "/account" });
     } catch (e) {
       setError(

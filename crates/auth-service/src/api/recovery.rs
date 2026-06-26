@@ -91,6 +91,8 @@ pub async fn redeem(
             user.user_id,
             SessionLevel::Enroll,
             vec!["recovery".to_string()],
+            super::summarize_user_agent(&headers),
+            super::client_region(&headers),
         )
         .await?;
     tracing::info!(target: "audit", event = "recovery_redeemed", user_id = %user.user_id);

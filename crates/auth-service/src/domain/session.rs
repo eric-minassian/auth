@@ -39,6 +39,15 @@ pub struct IdpSession {
     /// generating recovery codes require this to be recent.
     #[serde(default)]
     pub reauth_at: i64,
+    /// Coarse "Browser on OS" label derived from the User-Agent at sign-in —
+    /// the only device-awareness channel in an email-free model. Display only;
+    /// never an identifier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device: Option<String>,
+    /// Coarse region (CloudFront-Viewer-Country ISO code) at sign-in. Country,
+    /// not IP, to keep the anti-fingerprinting/privacy posture.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
 }
 
 impl IdpSession {

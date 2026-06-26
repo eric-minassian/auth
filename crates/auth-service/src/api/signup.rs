@@ -120,6 +120,8 @@ pub async fn start(
             user.user_id,
             SessionLevel::Enroll,
             vec!["pending".to_string()],
+            crate::api::summarize_user_agent(&headers),
+            crate::api::client_region(&headers),
         )
         .await?;
     tracing::info!(target: "audit", event = "signup_start", user_id = %user.user_id);

@@ -7,6 +7,7 @@ use url::Url;
 use crate::domain::oauth::{OidcClient, SCOPE_OPENID, granted_scopes, scope_contains};
 use crate::domain::session::SessionLevel;
 use crate::state::AppState;
+use crate::store::now;
 use crate::store::oauth::AuthCodeData;
 
 #[derive(Debug, Deserialize)]
@@ -19,8 +20,20 @@ pub struct AuthorizeQuery {
     pub nonce: Option<String>,
     pub code_challenge: Option<String>,
     pub code_challenge_method: Option<String>,
+    /// Space-delimited OIDC `prompt` values. We act on `none`, `login`, and
+    /// `create`; other standard values (`consent`, `select_account`) are
+    /// ignored (no consent screen, single subject).
     pub prompt: Option<String>,
+    /// OIDC `max_age` (seconds). Kept as a string so a non-numeric value is
+    /// ignored rather than failing query extraction before redirect_uri is
+    /// validated.
+    pub max_age: Option<String>,
 }
+
+/// A just-completed login must satisfy `prompt=login` / `max_age` without
+/// bouncing straight back to sign-in; this grace absorbs the redirect
+/// round-trip while still forcing re-auth for any older session.
+const FRESH_LOGIN_GRACE_SECS: i64 = 60;
 
 /// GET /oauth/authorize — the OIDC authorization endpoint.
 ///
@@ -58,7 +71,8 @@ pub async fn authorize(
     }
 
     // From here on, errors are safe to send to the RP.
-    let rp_error = |error: &str| rp_redirect(redirect_uri, &[("error", error)], &query.state);
+    let rp_error =
+        |error: &str| rp_redirect(redirect_uri, issuer, &[("error", error)], &query.state);
 
     if query.response_type.as_deref() != Some("code") {
         return rp_error("unsupported_response_type");
@@ -85,6 +99,29 @@ pub async fn authorize(
     if !scope_contains(&scope, SCOPE_OPENID) {
         return rp_error("invalid_scope");
     }
+
+    // Fresh-auth controls (OIDC Core §3.1.2.1). `none` must stand alone.
+    let prompts: Vec<&str> = query
+        .prompt
+        .as_deref()
+        .unwrap_or_default()
+        .split_whitespace()
+        .collect();
+    if prompts.contains(&"none") && prompts.len() > 1 {
+        return rp_error("invalid_request");
+    }
+    let want_none = prompts.contains(&"none");
+    let want_login = prompts.contains(&"login");
+    let want_create = prompts.contains(&"create");
+    // Greatest age (seconds) the backing login may have. `prompt=login` forces
+    // a fresh assertion (0); `max_age` caps it; absent both, there is no
+    // freshness requirement. `None` here means "no requirement".
+    let max_age = query.max_age.as_deref().and_then(|s| s.parse::<i64>().ok());
+    let max_auth_age = if want_login {
+        Some(0)
+    } else {
+        max_age.map(|m| m.max(0))
+    };
 
     // 3. The SSO layer: the IdP's own session cookie.
     let session = match jar.get(&state.cfg.cookie_name) {
@@ -113,20 +150,43 @@ pub async fn authorize(
         None => None,
     };
 
+    // Apply fresh-auth controls. `prompt=create` always routes to signup
+    // (an explicit registration request), bypassing any existing session;
+    // otherwise the session is usable only if its login is recent enough for
+    // `max_age` / `prompt=login`. The grace floor breaks the
+    // sign-in → authorize redirect loop: a login completed within the
+    // round-trip of this very request satisfies any freshness ask (otherwise
+    // `max_age=0` would bounce forever, the now-fresh session never quite
+    // young enough).
+    let session = session.filter(|s| {
+        if want_create {
+            return false;
+        }
+        match max_auth_age {
+            None => true,
+            Some(limit) => {
+                let age = now() - s.created_at;
+                age <= limit || age <= FRESH_LOGIN_GRACE_SECS
+            }
+        }
+    });
+
     let Some(session) = session else {
-        if query.prompt.as_deref() == Some("none") {
+        if want_none {
+            // Can't actively re-authenticate without UI.
             return rp_error("login_required");
         }
-        // Send the browser to the sign-in UI, which returns to this exact
-        // authorize URL after login. Use the relative path+query only: behind
-        // API Gateway the reconstructed URI carries the internal execute-api
-        // host, which the SPA's same-origin return_to guard would reject.
+        // Send the browser to the sign-in (or signup) UI, which returns to this
+        // exact authorize URL afterwards. Use the relative path+query only:
+        // behind API Gateway the reconstructed URI carries the internal
+        // execute-api host, which the SPA's same-origin return_to guard rejects.
         let return_to = original_uri
             .path_and_query()
             .map(|pq| pq.as_str())
             .unwrap_or("/oauth/authorize");
+        let entry = if want_create { "sign-up" } else { "sign-in" };
         return Redirect::to(&format!(
-            "{issuer}/sign-in?return_to={}",
+            "{issuer}/{entry}?return_to={}",
             urlencoding(return_to)
         ));
     };
@@ -151,10 +211,19 @@ pub async fn authorize(
         }
     };
     tracing::info!(target: "audit", event = "code_issued", client_id = %client.client_id, user_id = %session.user_id);
-    rp_redirect(redirect_uri, &[("code", &code)], &query.state)
+    rp_redirect(redirect_uri, issuer, &[("code", &code)], &query.state)
 }
 
-fn rp_redirect(redirect_uri: &str, params: &[(&str, &str)], state: &Option<String>) -> Redirect {
+/// Bounce back to the RP, always stamping the authorization-server identifier
+/// (`iss`, RFC 9207) on both success and error responses so the client can
+/// detect a mix-up attack (a response from the wrong AS) regardless of how many
+/// authorization servers it talks to.
+fn rp_redirect(
+    redirect_uri: &str,
+    issuer: &str,
+    params: &[(&str, &str)],
+    state: &Option<String>,
+) -> Redirect {
     let mut url = match Url::parse(redirect_uri) {
         Ok(url) => url,
         // Registered URIs are validated at seed time; this is unreachable in
@@ -169,6 +238,7 @@ fn rp_redirect(redirect_uri: &str, params: &[(&str, &str)], state: &Option<Strin
         if let Some(state) = state {
             query.append_pair("state", state);
         }
+        query.append_pair("iss", issuer);
     }
     Redirect::to(url.as_str())
 }

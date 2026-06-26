@@ -55,6 +55,10 @@ export interface PasskeyInfo {
   name: string;
   created_at: number;
   last_used_at: number | null;
+  /** Backup-eligible (syncable passkey) hint; `null`/absent if unknown. */
+  backup_eligible?: boolean | null;
+  /** Backup-state (currently backed up) hint. */
+  backup_state?: boolean | null;
 }
 
 export interface SessionListItem {
@@ -63,4 +67,8 @@ export interface SessionListItem {
   last_seen_at: number;
   amr: string[];
   current: boolean;
+  /** Coarse "Browser on OS" device label captured at sign-in. */
+  device?: string | null;
+  /** Coarse region (ISO country code) captured at sign-in. */
+  region?: string | null;
 }

@@ -25,9 +25,17 @@ export class AuthError extends Error {
   }
 }
 
-/** The authenticated subject, derived from the ID token / userinfo. */
+/**
+ * The authenticated subject, derived from the ID token / userinfo.
+ *
+ * Identity is keyed on `sub` (+ the issuer) — never on `nickname`, which is a
+ * mutable, non-unique display label present only under the `profile` scope.
+ * This provider issues no email; there is intentionally no `email` field.
+ */
 export interface User {
   sub: string;
-  email?: string;
-  emailVerified?: boolean;
+  /** Display name (mutable, non-unique). Present only with the `profile` scope. */
+  nickname?: string;
+  /** Unix seconds the profile was last updated. Present only with `profile`. */
+  updatedAt?: number;
 }

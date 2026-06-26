@@ -233,6 +233,12 @@ pub struct RefreshFamily {
     pub last_used_at: i64,
     pub idle_expires_at: i64,
     pub absolute_expires_at: i64,
+    /// DPoP key thumbprint (RFC 9449) this family is sender-constrained to, if
+    /// the originating token request presented a proof. When set, rotation
+    /// requires a matching proof — an exfiltrated refresh token is useless
+    /// without the (non-extractable) DPoP key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dpop_jkt: Option<String>,
     // attribute_not_exists(revoked_at) gates rotation/revocation: None must
     // be absent, not a DynamoDB Null.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -288,6 +294,7 @@ impl Store {
         client_id: &str,
         sid_hash: &str,
         scope: &str,
+        dpop_jkt: Option<&str>,
     ) -> Result<String, StoreError> {
         let secret = random_b64u(32);
         let ts = now();
@@ -303,6 +310,7 @@ impl Store {
             last_used_at: ts,
             idle_expires_at: ts + REFRESH_IDLE_SECS,
             absolute_expires_at: ts + REFRESH_ABSOLUTE_SECS,
+            dpop_jkt: dpop_jkt.map(str::to_string),
             revoked_at: None,
             revoked_reason: None,
         };

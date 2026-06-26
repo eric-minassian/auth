@@ -44,12 +44,73 @@ import {
   generateRecoveryCodes,
   getRecoveryReadiness,
   registerPasskey,
+  signalAcceptedCredentials,
   withStepUp,
 } from "../lib/webauthn.js";
 import { rootRoute } from "./root.js";
 
+// Below this many remaining codes, nudge the user to regenerate.
+const LOW_RECOVERY_CODES = 3;
+// Flag set by the recovery flow so the account page drops the user straight
+// into generating a fresh set of codes (they just completed a UV assertion).
+const POST_RECOVERY_FLAG = "ema_post_recovery";
+
 function formatDate(epochSeconds: number): string {
   return new Date(epochSeconds * 1000).toLocaleString();
+}
+
+/** A session touched within the last ~5 minutes is "active now". */
+function isActiveNow(lastSeenSeconds: number): boolean {
+  return Date.now() / 1000 - lastSeenSeconds < 5 * 60;
+}
+
+/** A non-current session created in the last 24h is flagged as a new device. */
+function isNewDevice(s: SessionListItem): boolean {
+  return !s.current && Date.now() / 1000 - s.created_at < 24 * 60 * 60;
+}
+
+/** Human label for a session's origin: "Chrome on macOS · US". */
+function sessionOrigin(s: SessionListItem): string {
+  return [s.device, s.region].filter(Boolean).join(" · ") || "Unknown device";
+}
+
+const RECOVERY_FILE_HEADER =
+  "auth.ericminassian.com recovery codes\nKeep these private. Each works once; they replace any previous set.\n\n";
+
+/** Download the one-time codes as a local text file (no out-of-band channel). */
+function downloadCodes(codes: string[]): void {
+  const blob = new Blob([RECOVERY_FILE_HEADER + codes.join("\n") + "\n"], {
+    type: "text/plain",
+  });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = "recovery-codes.txt";
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+/** Open the browser print dialog with just the codes. */
+function printCodes(codes: string[]): void {
+  const frame = document.createElement("iframe");
+  frame.style.position = "fixed";
+  frame.style.right = "0";
+  frame.style.bottom = "0";
+  frame.style.width = "0";
+  frame.style.height = "0";
+  frame.style.border = "0";
+  document.body.appendChild(frame);
+  const doc = frame.contentDocument;
+  if (doc) {
+    const pre = doc.createElement("pre");
+    pre.style.fontFamily = "monospace";
+    pre.style.fontSize = "14px";
+    pre.textContent = RECOVERY_FILE_HEADER + codes.join("\n");
+    doc.body.appendChild(pre);
+    frame.contentWindow?.focus();
+    frame.contentWindow?.print();
+  }
+  setTimeout(() => frame.remove(), 1000);
 }
 
 function Account() {
@@ -60,6 +121,8 @@ function Account() {
   const [readiness, setReadiness] = useState<RecoveryReadiness>();
   // Newly generated recovery codes, shown exactly once.
   const [newCodes, setNewCodes] = useState<string[]>();
+  // Gate dismissing the one-time codes behind an explicit acknowledgement.
+  const [codesSaved, setCodesSaved] = useState(false);
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
@@ -73,27 +136,14 @@ function Account() {
     setPasskeys(p.passkeys);
     setSessions(sess.sessions);
     setReadiness(r);
+    // Keep this device's passkey manager in sync with the server's full list.
+    void signalAcceptedCredentials(
+      s.user.user_id,
+      p.passkeys.map((k) => k.credential_id),
+    );
   }, []);
 
-  useEffect(() => {
-    void load().catch(() => navigate({ to: "/sign-in" }));
-  }, [load, navigate]);
-
-  async function addPasskey() {
-    setBusy(true);
-    try {
-      // Adding a passkey from a non-fresh session requires a step-up assertion.
-      await withStepUp(() => registerPasskey());
-      toast.success("Passkey added");
-      await load();
-    } catch {
-      toast.error("Could not add a passkey");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function generateCodes() {
+  const generateCodes = useCallback(async () => {
     setBusy(true);
     try {
       const codes = await generateRecoveryCodes();
@@ -103,6 +153,50 @@ function Account() {
       toast.error("Could not generate recovery codes");
     } finally {
       setBusy(false);
+    }
+  }, [load]);
+
+  useEffect(() => {
+    void load()
+      .then(() => {
+        // Coming from a recovery: the session is freshly user-verified, so go
+        // straight into generating replacement codes.
+        if (sessionStorage.getItem(POST_RECOVERY_FLAG)) {
+          sessionStorage.removeItem(POST_RECOVERY_FLAG);
+          void generateCodes();
+        }
+      })
+      .catch(() => navigate({ to: "/sign-in" }));
+  }, [load, generateCodes, navigate]);
+
+  async function addPasskey() {
+    setBusy(true);
+    try {
+      // Adding a passkey from a non-fresh session requires a step-up assertion.
+      const result = await withStepUp(() => registerPasskey());
+      if (result.discoverable === false) {
+        toast.warning(
+          "This device couldn't store a sign-in-ready passkey. Try a platform authenticator (Touch ID, Windows Hello, or a passkey manager).",
+        );
+      } else {
+        toast.success("Passkey added");
+      }
+      await load();
+    } catch {
+      toast.error("Could not add a passkey");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function renamePasskey(id: string, current: string) {
+    const name = window.prompt("Rename passkey", current)?.trim();
+    if (!name || name === current) return;
+    try {
+      await api.patch(`/api/account/passkeys/${encodeURIComponent(id)}`, { name });
+      await load();
+    } catch (e) {
+      toast.error(e instanceof ApiError ? e.message : "Could not rename passkey");
     }
   }
 
@@ -128,12 +222,21 @@ function Account() {
   }
 
   async function deleteAccount() {
-    await api.del("/api/account");
-    navigate({ to: "/sign-in" });
+    try {
+      // Deletion is irreversible, so the server requires a fresh assertion.
+      await withStepUp(() => api.del("/api/account"));
+      // Prune this account's passkeys from the local manager on the way out.
+      if (session) await signalAcceptedCredentials(session.user.user_id, []);
+      navigate({ to: "/sign-in" });
+    } catch (e) {
+      toast.error(e instanceof ApiError ? e.message : "Could not delete account");
+    }
   }
 
   const onlyOnePasskey = (readiness?.passkey_count ?? 0) < 2;
-  const noRecoveryCodes = (readiness?.recovery_codes_remaining ?? 0) === 0;
+  const remainingCodes = readiness?.recovery_codes_remaining ?? 0;
+  const noRecoveryCodes = remainingCodes === 0;
+  const lowRecoveryCodes = remainingCodes > 0 && remainingCodes < LOW_RECOVERY_CODES;
 
   return (
     <div className="flex w-full max-w-xl flex-col gap-6 py-8">
@@ -174,7 +277,14 @@ function Account() {
               {passkeys.map((passkey) => (
                 <Item key={passkey.credential_id} variant="outline">
                   <ItemContent>
-                    <ItemTitle>{passkey.name}</ItemTitle>
+                    <ItemTitle className="flex items-center gap-2">
+                      {passkey.name}
+                      {passkey.backup_eligible === true ? (
+                        <Badge variant="secondary">Synced</Badge>
+                      ) : passkey.backup_eligible === false ? (
+                        <Badge variant="outline">Device-bound</Badge>
+                      ) : null}
+                    </ItemTitle>
                     <ItemDescription>
                       Added {formatDate(passkey.created_at)}
                       {passkey.last_used_at
@@ -183,6 +293,13 @@ function Account() {
                     </ItemDescription>
                   </ItemContent>
                   <ItemActions>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => void renamePasskey(passkey.credential_id, passkey.name)}
+                    >
+                      Rename
+                    </Button>
                     <ConfirmDelete
                       title="Remove this passkey?"
                       description="You won't be able to sign in with this device anymore."
@@ -205,8 +322,13 @@ function Account() {
               Your only way back in if you lose every passkey. There is no email reset.
             </CardDescription>
           </div>
-          <Button size="sm" variant={noRecoveryCodes ? "default" : "outline"} onClick={generateCodes} disabled={busy}>
-            {readiness && readiness.recovery_codes_remaining > 0 ? "Regenerate" : "Generate"}
+          <Button
+            size="sm"
+            variant={noRecoveryCodes || lowRecoveryCodes ? "default" : "outline"}
+            onClick={() => void generateCodes()}
+            disabled={busy}
+          >
+            {remainingCodes > 0 ? "Regenerate" : "Generate"}
           </Button>
         </CardHeader>
         <CardContent>
@@ -218,7 +340,7 @@ function Account() {
               <pre className="bg-muted overflow-x-auto rounded-md p-3 font-mono text-sm leading-6">
                 {newCodes.join("\n")}
               </pre>
-              <div className="flex gap-2">
+              <div className="flex flex-wrap gap-2">
                 <Button
                   size="sm"
                   variant="outline"
@@ -230,18 +352,47 @@ function Account() {
                 >
                   Copy
                 </Button>
-                <Button size="sm" onClick={() => setNewCodes(undefined)}>
-                  I've saved them
+                <Button size="sm" variant="outline" onClick={() => downloadCodes(newCodes)}>
+                  Download
+                </Button>
+                <Button size="sm" variant="outline" onClick={() => printCodes(newCodes)}>
+                  Print
                 </Button>
               </div>
+              <label className="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={codesSaved}
+                  onChange={(e) => setCodesSaved(e.target.checked)}
+                />
+                I've saved these codes somewhere safe
+              </label>
+              <Button
+                size="sm"
+                disabled={!codesSaved}
+                onClick={() => {
+                  setNewCodes(undefined);
+                  setCodesSaved(false);
+                }}
+              >
+                Done
+              </Button>
             </div>
           ) : readiness === undefined ? (
             <Skeleton className="h-6 w-48" />
           ) : (
-            <p className="text-muted-foreground text-sm">
-              {readiness.recovery_codes_remaining > 0
-                ? `${readiness.recovery_codes_remaining} unused recovery code${readiness.recovery_codes_remaining === 1 ? "" : "s"} remaining.`
-                : "You have no recovery codes. Generate a set and store them somewhere safe."}
+            <p
+              className={
+                lowRecoveryCodes || noRecoveryCodes
+                  ? "text-destructive text-sm"
+                  : "text-muted-foreground text-sm"
+              }
+            >
+              {noRecoveryCodes
+                ? "You have no recovery codes. Generate a set and store them somewhere safe."
+                : lowRecoveryCodes
+                  ? `Only ${remainingCodes} recovery code${remainingCodes === 1 ? "" : "s"} left — regenerate a fresh set soon.`
+                  : `${remainingCodes} unused recovery codes remaining.`}
             </p>
           )}
         </CardContent>
@@ -260,9 +411,14 @@ function Account() {
               {sessions.map((s) => (
                 <Item key={s.session_id} variant="outline">
                   <ItemContent>
-                    <ItemTitle className="flex items-center gap-2">
-                      Session
-                      {s.current ? <Badge variant="secondary">This device</Badge> : null}
+                    <ItemTitle className="flex flex-wrap items-center gap-2">
+                      {sessionOrigin(s)}
+                      {s.current ? (
+                        <Badge variant="secondary">This device</Badge>
+                      ) : isActiveNow(s.last_seen_at) ? (
+                        <Badge variant="secondary">Active now</Badge>
+                      ) : null}
+                      {isNewDevice(s) ? <Badge variant="destructive">New device</Badge> : null}
                     </ItemTitle>
                     <ItemDescription>
                       Started {formatDate(s.created_at)} · last seen {formatDate(s.last_seen_at)}

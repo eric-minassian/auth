@@ -78,7 +78,9 @@ test("generate recovery codes, then recover the account with one", async ({ page
     .map((c) => c.trim())
     .filter(Boolean);
   expect(codes.length).toBe(10);
-  await page.getByRole("button", { name: /saved them/ }).click();
+  // Dismiss the one-time codes: acknowledge via the checkbox, then confirm.
+  await page.getByRole("checkbox").check();
+  await page.getByRole("button", { name: /^Done$/ }).click();
 
   // Sign out, then simulate recovering on a NEW device: drop the authenticator
   // holding the original passkey and attach a fresh one (otherwise registering

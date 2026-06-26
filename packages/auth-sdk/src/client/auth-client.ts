@@ -1,4 +1,5 @@
 import { AuthError, DEFAULT_ISSUER, type User } from "../index.js";
+import { createDpopSigner } from "./dpop.js";
 import { createPkcePair, createState } from "./pkce.js";
 import { defaultStorage, type TokenStorage } from "./storage.js";
 
@@ -7,7 +8,7 @@ export interface AuthClientOptions {
   redirectUri: string;
   /** Defaults to `https://auth.ericminassian.com`. */
   issuer?: string;
-  /** Defaults to `openid email offline_access`. */
+  /** Defaults to `openid profile offline_access`. */
   scope?: string;
   storage?: TokenStorage;
 }
@@ -81,8 +82,11 @@ const SILENT_TIMEOUT_MS = 8000;
 
 export function createAuthClient(options: AuthClientOptions): AuthClient {
   const issuer = (options.issuer ?? DEFAULT_ISSUER).replace(/\/$/, "");
-  const scope = options.scope ?? "openid email offline_access";
+  const scope = options.scope ?? "openid profile offline_access";
   const storage = options.storage ?? defaultStorage();
+  // Sender-constrain tokens with DPoP when the browser supports it; falls back
+  // to bearer tokens otherwise (the server accepts both).
+  const dpop = createDpopSigner();
 
   let discovery: Promise<Discovery> | undefined;
   let cachedToken: CachedToken | undefined;
@@ -108,13 +112,46 @@ export function createAuthClient(options: AuthClientOptions): AuthClient {
     return discovery;
   }
 
-  async function exchange(body: Record<string, string>): Promise<void> {
-    const { token_endpoint } = await getDiscovery();
-    const response = await fetch(token_endpoint, {
+  // POST to the token endpoint with a DPoP proof when available, transparently
+  // retrying once if the server challenges for a nonce (RFC 9449 §8).
+  async function tokenRequest(
+    endpoint: string,
+    body: Record<string, string>,
+    nonce?: string,
+  ): Promise<Response> {
+    const headers: Record<string, string> = {
+      "content-type": "application/x-www-form-urlencoded",
+    };
+    if (dpop) {
+      headers["dpop"] = await dpop.proof(
+        "POST",
+        endpoint,
+        nonce !== undefined ? { nonce } : undefined,
+      );
+    }
+    const response = await fetch(endpoint, {
       method: "POST",
-      headers: { "content-type": "application/x-www-form-urlencoded" },
+      headers,
       body: new URLSearchParams(body),
     });
+    if (response.status === 400 && dpop && !nonce) {
+      const challenge = response.headers.get("dpop-nonce");
+      if (challenge) {
+        const error = (await response
+          .clone()
+          .json()
+          .catch(() => undefined)) as { error?: string } | undefined;
+        if (error?.error === "use_dpop_nonce") {
+          return tokenRequest(endpoint, body, challenge);
+        }
+      }
+    }
+    return response;
+  }
+
+  async function exchange(body: Record<string, string>): Promise<void> {
+    const { token_endpoint } = await getDiscovery();
+    const response = await tokenRequest(token_endpoint, body);
     if (!response.ok) {
       throw new AuthError(
         body.grant_type === "refresh_token" ? "token_refresh_failed" : "invalid_grant",
@@ -180,6 +217,13 @@ export function createAuthClient(options: AuthClientOptions): AuthClient {
     }
     if (params.get("state") !== tx.state) {
       throw new AuthError("state_mismatch", "state parameter mismatch");
+    }
+    // RFC 9207: if the AS stamped an issuer, it must be ours — defends against
+    // a mix-up attack that swaps in a response from a different authorization
+    // server. (Absent for legacy responses; only enforced when present.)
+    const responseIss = params.get("iss");
+    if (responseIss !== null && responseIss !== issuer) {
+      throw new AuthError("state_mismatch", "issuer mismatch in authorization response");
     }
     const code = params.get("code");
     if (!code) throw new AuthError("invalid_grant", "missing authorization code");
@@ -349,8 +393,8 @@ function userFromIdToken(idToken: string): User | undefined {
   try {
     const payload = JSON.parse(base64urlDecode(parts[1] ?? "")) as {
       sub?: string;
-      email?: string;
-      email_verified?: boolean;
+      nickname?: string;
+      updated_at?: number;
       exp?: number;
     };
     if (!payload.sub) return undefined;
@@ -361,8 +405,9 @@ function userFromIdToken(idToken: string): User | undefined {
       return undefined;
     }
     const user: User = { sub: payload.sub };
-    if (payload.email !== undefined) user.email = payload.email;
-    if (payload.email_verified !== undefined) user.emailVerified = payload.email_verified;
+    // `nickname`/`updated_at` arrive only under the `profile` scope.
+    if (payload.nickname !== undefined) user.nickname = payload.nickname;
+    if (payload.updated_at !== undefined) user.updatedAt = payload.updated_at;
     return user;
   } catch {
     return undefined;

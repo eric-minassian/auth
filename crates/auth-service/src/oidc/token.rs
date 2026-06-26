@@ -5,17 +5,17 @@ use axum::{Form, Json};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::{OAuthError, pkce};
+use super::{OAuthError, dpop, pkce};
 use crate::api::rate_ip_key;
 use crate::crypto::random_b64u;
 use crate::domain::oauth::{SCOPE_OFFLINE_ACCESS, SCOPE_OPENID, SCOPE_PROFILE, scope_contains};
 use crate::domain::user::User;
 use crate::jwt::claims::{
-    ACCESS_TOKEN_TTL_SECS, AccessTokenClaims, ID_TOKEN_TTL_SECS, IdTokenClaims,
+    ACCESS_TOKEN_TTL_SECS, AccessTokenClaims, Cnf, ID_TOKEN_TTL_SECS, IdTokenClaims,
 };
 use crate::state::AppState;
 use crate::store::now;
-use crate::store::oauth::{CodeConsume, RotateOutcome};
+use crate::store::oauth::{CodeConsume, RotateOutcome, decode_refresh_token};
 use crate::store::rate_limit::RateClass;
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -70,9 +70,15 @@ pub async fn token(
         });
     }
 
+    // If the request carries a DPoP proof, validate it once here and bind the
+    // issued tokens to its key. Absent a proof, tokens are plain bearer
+    // (incremental rollout — DPoP is honored, not required).
+    let htu = format!("{}/oauth/token", state.cfg.issuer);
+    let dpop_jkt = dpop_binding(&state, &headers, &htu).await?;
+
     let response = match req.grant_type.as_str() {
-        "authorization_code" => exchange_code(&state, &req).await?,
-        "refresh_token" => refresh(&state, &req).await?,
+        "authorization_code" => exchange_code(&state, &req, dpop_jkt.as_deref()).await?,
+        "refresh_token" => refresh(&state, &req, dpop_jkt.as_deref()).await?,
         _ => return Err(OAuthError::unsupported_grant_type()),
     };
     Ok((
@@ -85,7 +91,50 @@ pub async fn token(
         .into_response())
 }
 
-async fn exchange_code(state: &AppState, req: &TokenRequest) -> Result<TokenResponse, OAuthError> {
+fn invalid_dpop(description: &'static str) -> OAuthError {
+    OAuthError {
+        error: "invalid_dpop_proof",
+        description,
+    }
+}
+
+/// Validate a DPoP proof presented with this token request, if any, and return
+/// the key thumbprint to sender-constrain the issued tokens. `None` = a plain
+/// bearer request. A malformed or replayed proof is a hard `invalid_dpop_proof`.
+async fn dpop_binding(
+    state: &AppState,
+    headers: &HeaderMap,
+    htu: &str,
+) -> Result<Option<String>, OAuthError> {
+    let mut proofs = headers.get_all("dpop").iter();
+    let Some(first) = proofs.next() else {
+        return Ok(None);
+    };
+    // Exactly one proof is permitted (RFC 9449 §4.1).
+    if proofs.next().is_some() {
+        return Err(invalid_dpop("multiple DPoP proofs"));
+    }
+    let proof = first
+        .to_str()
+        .map_err(|_| invalid_dpop("malformed DPoP header"))?;
+    let verified = dpop::verify_proof(proof, "POST", htu, None, now())
+        .map_err(|_| invalid_dpop("invalid DPoP proof"))?;
+    // One-time-use: reject a replayed proof.
+    if !state
+        .store
+        .record_dpop_jti(&verified.jkt, &verified.jti)
+        .await?
+    {
+        return Err(invalid_dpop("DPoP proof replay"));
+    }
+    Ok(Some(verified.jkt))
+}
+
+async fn exchange_code(
+    state: &AppState,
+    req: &TokenRequest,
+    dpop_jkt: Option<&str>,
+) -> Result<TokenResponse, OAuthError> {
     let code = req
         .code
         .as_deref()
@@ -145,6 +194,7 @@ async fn exchange_code(state: &AppState, req: &TokenRequest) -> Result<TokenResp
                     client_id,
                     &data.sid_hash,
                     &data.scope,
+                    dpop_jkt,
                 )
                 .await?,
         )
@@ -164,12 +214,17 @@ async fn exchange_code(state: &AppState, req: &TokenRequest) -> Result<TokenResp
             auth_time: data.auth_time,
             amr: &data.amr,
             refresh_token,
+            dpop_jkt,
         },
     )
     .await
 }
 
-async fn refresh(state: &AppState, req: &TokenRequest) -> Result<TokenResponse, OAuthError> {
+async fn refresh(
+    state: &AppState,
+    req: &TokenRequest,
+    dpop_jkt: Option<&str>,
+) -> Result<TokenResponse, OAuthError> {
     let token = req
         .refresh_token
         .as_deref()
@@ -178,6 +233,20 @@ async fn refresh(state: &AppState, req: &TokenRequest) -> Result<TokenResponse, 
         .client_id
         .as_deref()
         .ok_or_else(|| OAuthError::invalid_request("client_id is required"))?;
+
+    // DPoP gate, checked BEFORE the token is consumed: a sender-constrained
+    // family may only be rotated by presenting a proof for the same key. This
+    // is the crux of sender-constraining — an exfiltrated refresh token is
+    // useless without the (in the browser, non-extractable) DPoP private key.
+    // Gating before rotation also stops a key-less holder from
+    // rotating-and-discarding the token to lock out the legitimate client.
+    if let Some((family_id, _)) = decode_refresh_token(token)
+        && let Some(family) = state.store.get_refresh_family(family_id).await?
+        && let Some(expected) = family.dpop_jkt.as_deref()
+        && dpop_jkt != Some(expected)
+    {
+        return Err(invalid_dpop("DPoP key mismatch"));
+    }
 
     let (family, new_token) = match state.store.rotate_refresh_token(token).await? {
         RotateOutcome::Rotated { family, new_token } => (family, new_token),
@@ -235,6 +304,8 @@ async fn refresh(state: &AppState, req: &TokenRequest) -> Result<TokenResponse, 
             // sessions (login_finish), so today this is always ["webauthn"].
             amr: &session.amr,
             refresh_token: Some(new_token),
+            // The new access token stays bound to the family's DPoP key.
+            dpop_jkt: family.dpop_jkt.as_deref(),
         },
     )
     .await
@@ -249,6 +320,7 @@ struct MintInput<'a> {
     auth_time: i64,
     amr: &'a [String],
     refresh_token: Option<String>,
+    dpop_jkt: Option<&'a str>,
 }
 
 async fn mint(state: &AppState, input: MintInput<'_>) -> Result<TokenResponse, OAuthError> {
@@ -264,6 +336,9 @@ async fn mint(state: &AppState, input: MintInput<'_>) -> Result<TokenResponse, O
         iat: ts,
         exp: ts + ACCESS_TOKEN_TTL_SECS,
         jti: Uuid::now_v7().to_string(),
+        cnf: input.dpop_jkt.map(|jkt| Cnf {
+            jkt: jkt.to_string(),
+        }),
     };
     let access_token = state.signer.sign("at+jwt", &access).await?;
 
@@ -289,7 +364,13 @@ async fn mint(state: &AppState, input: MintInput<'_>) -> Result<TokenResponse, O
 
     Ok(TokenResponse {
         access_token,
-        token_type: "Bearer".to_string(),
+        // RFC 9449 §5: a sender-constrained token is returned as `DPoP`, telling
+        // the client to present it with a proof at resource servers.
+        token_type: if input.dpop_jkt.is_some() {
+            "DPoP".to_string()
+        } else {
+            "Bearer".to_string()
+        },
         expires_in: ACCESS_TOKEN_TTL_SECS,
         scope: input.scope.to_string(),
         id_token,

@@ -56,15 +56,13 @@ describe("createAuthVerifier", () => {
     const token = await sign({
       sub: "user-1",
       sid: "sid-1",
-      scope: "openid email",
+      scope: "openid profile",
       client_id: AUDIENCE,
       jti: "jti-1",
-      email: "a@test.dev",
     });
     const claims = await verifier.verifyAccessToken(token);
     expect(claims.sub).toBe("user-1");
-    expect(claims.scope).toBe("openid email");
-    expect(claims.email).toBe("a@test.dev");
+    expect(claims.scope).toBe("openid profile");
   });
 
   it("rejects a token with the wrong audience", async () => {

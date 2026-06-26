@@ -94,6 +94,12 @@ pub fn build_router(state: AppState) -> Router {
             "/.well-known/openid-configuration",
             get(oidc::discovery::openid_configuration),
         )
+        // RFC 8414 alias so non-OIDC OAuth libraries (which look here, not at
+        // the OIDC path) discover the same metadata.
+        .route(
+            "/.well-known/oauth-authorization-server",
+            get(oidc::discovery::openid_configuration),
+        )
         .route("/.well-known/jwks.json", get(oidc::jwks::jwks))
         .layer(axum_middleware::from_fn(oidc::cors::allow_public));
 

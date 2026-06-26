@@ -34,6 +34,8 @@ impl Store {
         user_id: Uuid,
         level: SessionLevel,
         amr: Vec<String>,
+        device: Option<String>,
+        region: Option<String>,
     ) -> Result<(String, IdpSession), StoreError> {
         let sid = random_b64u(32);
         let sid_hash = sha256_b64u(&sid);
@@ -58,6 +60,8 @@ impl Store {
                 SessionLevel::Full => ts,
                 SessionLevel::Enroll => 0,
             },
+            device,
+            region,
         };
         let item = serde_dynamo::to_item(SessionItem {
             pk: session_pk(&sid_hash),

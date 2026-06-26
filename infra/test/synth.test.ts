@@ -151,7 +151,12 @@ describe("AuthApp", () => {
     app.hasResourceProperties("AWS::CloudFront::OriginRequestPolicy", {
       OriginRequestPolicyConfig: Match.objectLike({
         HeadersConfig: Match.objectLike({
-          Headers: Match.arrayWith(["CloudFront-Viewer-Address", "CloudFront-Viewer-ASN"]),
+          Headers: Match.arrayWith([
+            "CloudFront-Viewer-Address",
+            "CloudFront-Viewer-ASN",
+            // Coarse country for the account page's session list.
+            "CloudFront-Viewer-Country",
+          ]),
         }),
       }),
     });
@@ -178,14 +183,50 @@ describe("AuthApp", () => {
     });
   });
 
-  it("enforces HSTS and a CSP on the SPA", () => {
+  it("enforces HSTS and a hardened CSP on the SPA", () => {
     app.hasResourceProperties("AWS::CloudFront::ResponseHeadersPolicy", {
       ResponseHeadersPolicyConfig: Match.objectLike({
         SecurityHeadersConfig: Match.objectLike({
           StrictTransportSecurity: Match.objectLike({ Preload: true }),
           ContentSecurityPolicy: Match.objectLike({
-            ContentSecurityPolicy: Match.stringLikeRegexp("frame-ancestors 'none'"),
+            ContentSecurityPolicy: Match.stringLikeRegexp(
+              "frame-ancestors 'none'.*object-src 'none'|object-src 'none'.*frame-ancestors 'none'",
+            ),
           }),
+        }),
+      }),
+    });
+  });
+
+  it("ships COOP, Permissions-Policy, and a Trusted-Types Report-Only CSP on the SPA", () => {
+    app.hasResourceProperties("AWS::CloudFront::ResponseHeadersPolicy", {
+      ResponseHeadersPolicyConfig: Match.objectLike({
+        CustomHeadersConfig: Match.objectLike({
+          Items: Match.arrayWith([
+            Match.objectLike({
+              Header: "Content-Security-Policy-Report-Only",
+              Value: Match.stringLikeRegexp("require-trusted-types-for 'script'"),
+            }),
+            Match.objectLike({
+              Header: "Cross-Origin-Opener-Policy",
+              Value: "same-origin-allow-popups",
+            }),
+            Match.objectLike({ Header: "Permissions-Policy" }),
+          ]),
+        }),
+      }),
+    });
+  });
+
+  it("sets HSTS + no-referrer on the API surface without frame-denying it", () => {
+    // /oauth/authorize must stay iframe-able for the SDK's silent-auth flow, so
+    // the API headers policy carries HSTS + Referrer-Policy but no FrameOptions.
+    app.hasResourceProperties("AWS::CloudFront::ResponseHeadersPolicy", {
+      ResponseHeadersPolicyConfig: Match.objectLike({
+        SecurityHeadersConfig: Match.objectLike({
+          StrictTransportSecurity: Match.objectLike({ Preload: true }),
+          ReferrerPolicy: Match.objectLike({ ReferrerPolicy: "no-referrer" }),
+          FrameOptions: Match.absent(),
         }),
       }),
     });
