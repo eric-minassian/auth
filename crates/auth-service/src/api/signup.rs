@@ -91,7 +91,11 @@ pub async fn start(
 
     // Proof of work: consume the one-time challenge, then verify the solution
     // against the difficulty it was issued at.
-    let Some(difficulty) = state.store.consume_pow_challenge(&req.pow_challenge).await? else {
+    let Some(difficulty) = state
+        .store
+        .consume_pow_challenge(&req.pow_challenge)
+        .await?
+    else {
         return Err(ApiError::BadRequest(
             "invalid or expired challenge".to_string(),
         ));

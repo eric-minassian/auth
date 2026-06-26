@@ -72,7 +72,12 @@ pub async fn redeem(
 
     // The code's owner must still exist and be active — prevents resurrecting a
     // deleted account through an orphaned code.
-    let Some(user) = state.store.get_user(user_id).await?.filter(|u| u.is_active()) else {
+    let Some(user) = state
+        .store
+        .get_user(user_id)
+        .await?
+        .filter(|u| u.is_active())
+    else {
         return Err(invalid());
     };
 
