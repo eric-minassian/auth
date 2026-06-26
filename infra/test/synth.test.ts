@@ -261,6 +261,13 @@ describe("AuthApp", () => {
     });
   });
 
+  it("restricts certificate issuance to Amazon CAs with a CAA record", () => {
+    app.hasResourceProperties("AWS::Route53::RecordSet", {
+      Type: "CAA",
+      Name: "auth.ericminassian.com.",
+    });
+  });
+
   it("retains the audit log group (off DESTROY) for forensics", () => {
     app.hasResource("AWS::Logs::LogGroup", {
       DeletionPolicy: "Retain",

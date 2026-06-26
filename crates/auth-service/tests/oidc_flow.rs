@@ -102,6 +102,21 @@ async fn discovery_and_jwks_are_served() {
 }
 
 #[tokio::test]
+async fn security_txt_is_served() {
+    let app = TestApp::spawn().await;
+    let res = app.server.get("/.well-known/security.txt").await;
+    res.assert_status(StatusCode::OK);
+    let body = res.text();
+    // RFC 9116 requires Contact + Expires; Canonical points back at the issuer.
+    assert!(body.contains("Contact:"), "missing Contact: {body}");
+    assert!(body.contains("Expires:"), "missing Expires: {body}");
+    assert!(
+        body.contains(&format!("{}/.well-known/security.txt", harness::ISSUER)),
+        "missing Canonical: {body}"
+    );
+}
+
+#[tokio::test]
 async fn full_code_pkce_flow_issues_verifiable_tokens() {
     let mut app = TestApp::spawn().await;
     app.seed_client(&rp_client()).await;

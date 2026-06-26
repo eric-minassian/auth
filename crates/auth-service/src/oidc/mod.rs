@@ -6,6 +6,7 @@ pub mod jwks;
 pub mod logout;
 pub mod pkce;
 pub mod revoke;
+pub mod security_txt;
 pub mod token;
 pub mod userinfo;
 
