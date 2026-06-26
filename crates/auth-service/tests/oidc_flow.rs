@@ -23,7 +23,7 @@ fn rp_client() -> OidcClient {
         allowed_origins: vec![RP_ORIGIN.to_string()],
         scopes: vec![
             "openid".to_string(),
-            "email".to_string(),
+            "profile".to_string(),
             "offline_access".to_string(),
         ],
     }
@@ -51,7 +51,7 @@ async fn get_code(app: &TestApp, pkce: &Pkce, state_param: &str, nonce: &str) ->
         .add_query_param("response_type", "code")
         .add_query_param("client_id", "rp")
         .add_query_param("redirect_uri", RP_CALLBACK)
-        .add_query_param("scope", "openid email offline_access")
+        .add_query_param("scope", "openid profile offline_access")
         .add_query_param("state", state_param)
         .add_query_param("nonce", nonce)
         .add_query_param("code_challenge", &pkce.challenge)
@@ -136,16 +136,18 @@ async fn full_code_pkce_flow_issues_verifiable_tokens() {
         .expect("id token verifies")
         .claims;
     assert_eq!(id_claims["nonce"], "noncevalue");
-    assert_eq!(id_claims["email"], "oidc@example.com");
-    assert_eq!(id_claims["email_verified"], true);
-    // The session was established by signup (email OTP) + passkey enrollment —
-    // no WebAuthn assertion occurred — so amr is ["otp"], NOT ["webauthn"].
-    // Only a real passkey login (login_finish) mints amr=["webauthn"].
+    assert_eq!(id_claims["nickname"], "oidc@example.com");
+    assert!(
+        id_claims.get("email").is_none(),
+        "no email claim is ever issued"
+    );
+    // signup_with_passkey ends with a real passkey login, so the session — and
+    // the token minted from it — carries amr=["webauthn"].
     assert!(
         id_claims["amr"]
             .as_array()
-            .is_some_and(|a| a.iter().any(|m| m == "otp") && a.iter().all(|m| m != "webauthn")),
-        "enrollment session must not claim webauthn amr: {:?}",
+            .is_some_and(|a| a.iter().any(|m| m == "webauthn")),
+        "passkey login must yield webauthn amr: {:?}",
         id_claims["amr"]
     );
     let kid = jsonwebtoken::decode_header(id_token).expect("header").kid;
@@ -159,7 +161,7 @@ async fn full_code_pkce_flow_issues_verifiable_tokens() {
         .await;
     res.assert_status(StatusCode::OK);
     let userinfo: serde_json::Value = res.json();
-    assert_eq!(userinfo["email"], "oidc@example.com");
+    assert_eq!(userinfo["nickname"], "oidc@example.com");
     assert_eq!(userinfo["sub"], id_claims["sub"]);
 
     // Second authorize (silent SSO): no UI, straight back with a code.

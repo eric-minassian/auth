@@ -5,7 +5,7 @@ use serde_json::json;
 use url::Url;
 use webauthn_authenticator_rs::WebauthnAuthenticator;
 use webauthn_authenticator_rs::softpasskey::SoftPasskey;
-use webauthn_rs::prelude::{CreationChallengeResponse, RequestChallengeResponse};
+use webauthn_rs::prelude::CreationChallengeResponse;
 
 use super::TestApp;
 
@@ -17,31 +17,28 @@ pub fn new_authenticator() -> WebauthnAuthenticator<SoftPasskey> {
     WebauthnAuthenticator::new(SoftPasskey::new(true))
 }
 
-/// signup → OTP → passkey registration. Ends with a FULL session in the
-/// cookie jar (register/finish upgrades the enroll session).
-pub async fn signup_with_passkey(
+/// Create an account (proof-of-work → pending user → first passkey) WITHOUT
+/// logging in. Ends with an enroll-level session in the cookie jar. Returns the
+/// new `user_id`.
+pub async fn register_new_account(
     app: &mut TestApp,
-    email: &str,
+    nickname: &str,
     authenticator: &mut WebauthnAuthenticator<SoftPasskey>,
-) {
-    app.post("/api/signup/start", &json!({ "email": email }))
-        .await
-        .assert_status(StatusCode::OK);
-    let code = app.take_otp(email);
-    app.post(
-        "/api/signup/verify",
-        &json!({ "email": email, "code": code }),
-    )
-    .await
-    .assert_status(StatusCode::OK);
-
-    let res = app.post("/api/webauthn/register/start", &json!({})).await;
+) -> String {
+    let (challenge, nonce) = app.solve_signup_pow().await;
+    let res = app
+        .post(
+            "/api/signup/start",
+            &json!({ "nickname": nickname, "pow_challenge": challenge, "pow_nonce": nonce }),
+        )
+        .await;
     res.assert_status(StatusCode::OK);
     let body: serde_json::Value = res.json();
     let ceremony_id = body["ceremony_id"]
         .as_str()
         .expect("ceremony id")
         .to_string();
+    let user_id = body["user_id"].as_str().expect("user id").to_string();
     let options: CreationChallengeResponse =
         serde_json::from_value(body["options"].clone()).expect("creation options");
 
@@ -50,39 +47,24 @@ pub async fn signup_with_passkey(
         .expect("soft passkey registration");
 
     app.post(
-        "/api/webauthn/register/finish",
+        "/api/signup/finish",
         &json!({ "ceremony_id": ceremony_id, "credential": credential, "name": "SoftPasskey" }),
     )
     .await
     .assert_status(StatusCode::OK);
+    user_id
 }
 
-/// Email-assisted passkey login; ends with a fresh FULL session.
-pub async fn login(
+/// Full onboarding: create the account, then establish a full session. Returns
+/// the new `user_id`. The real discoverable login ceremony is covered by the
+/// Playwright e2e (see [`TestApp::login_as`] for why Rust tests can't drive it).
+pub async fn signup_with_passkey(
     app: &mut TestApp,
-    email: &str,
+    nickname: &str,
     authenticator: &mut WebauthnAuthenticator<SoftPasskey>,
-) {
-    let res = app
-        .post("/api/webauthn/login/start", &json!({ "email": email }))
+) -> String {
+    let user_id = register_new_account(app, nickname, authenticator).await;
+    app.login_as(uuid::Uuid::parse_str(&user_id).expect("uuid"))
         .await;
-    res.assert_status(StatusCode::OK);
-    let body: serde_json::Value = res.json();
-    let ceremony_id = body["ceremony_id"]
-        .as_str()
-        .expect("ceremony id")
-        .to_string();
-    let options: RequestChallengeResponse =
-        serde_json::from_value(body["options"].clone()).expect("request options");
-
-    let credential = authenticator
-        .do_authentication(origin(), options)
-        .expect("soft passkey authentication");
-
-    app.post(
-        "/api/webauthn/login/finish",
-        &json!({ "ceremony_id": ceremony_id, "credential": credential }),
-    )
-    .await
-    .assert_status(StatusCode::OK);
+    user_id
 }

@@ -2,7 +2,6 @@ pub mod api;
 pub mod config;
 pub mod crypto;
 pub mod domain;
-pub mod email;
 pub mod error;
 pub mod jwt;
 pub mod middleware;
@@ -22,10 +21,10 @@ use crate::state::AppState;
 pub fn build_router(state: AppState) -> Router {
     let mut router = Router::new()
         .route("/api/healthz", get(api::healthz))
+        .route("/api/signup/pow", get(api::signup::pow))
         .route("/api/signup/start", post(api::signup::start))
-        .route("/api/signup/verify", post(api::signup::verify))
-        .route("/api/recovery/start", post(api::recovery::start))
-        .route("/api/recovery/verify", post(api::recovery::verify))
+        .route("/api/signup/finish", post(api::signup::finish))
+        .route("/api/recovery/redeem", post(api::recovery::redeem))
         .route("/api/session", get(api::session::get))
         .route("/api/session/logout", post(api::session::logout))
         .route(
@@ -44,6 +43,14 @@ pub fn build_router(state: AppState) -> Router {
             "/api/webauthn/login/finish",
             post(api::webauthn::login_finish),
         )
+        .route(
+            "/api/webauthn/reauth/start",
+            post(api::webauthn::reauth_start),
+        )
+        .route(
+            "/api/webauthn/reauth/finish",
+            post(api::webauthn::reauth_finish),
+        )
         .route("/api/account/passkeys", get(api::account::list_passkeys))
         .route(
             "/api/account/passkeys/{credential_id}",
@@ -54,11 +61,15 @@ pub fn build_router(state: AppState) -> Router {
             "/api/account/sessions/{session_id}",
             delete(api::account::revoke_session),
         )
+        .route(
+            "/api/account/recovery-codes",
+            post(api::account::generate_recovery_codes),
+        )
+        .route(
+            "/api/account/recovery-readiness",
+            get(api::account::recovery_readiness),
+        )
         .route("/api/account", delete(api::account::delete_account));
-
-    if state.cfg.dev_mode {
-        router = router.route("/api/dev/last-otp", get(api::dev::last_otp));
-    }
 
     // OIDC endpoints. token/revoke/userinfo are browser-callable from RP
     // origins (CORS allowlist from client registrations); they never read
@@ -98,5 +109,11 @@ pub fn build_router(state: AppState) -> Router {
             middleware::csrf::enforce,
         ))
         .layer(TraceLayer::new_for_http())
+        // Outermost: reject any request that didn't transit the CloudFront edge,
+        // so the CloudFront-Viewer-* derived rate-limit keys are trustworthy.
+        .layer(axum_middleware::from_fn_with_state(
+            state.clone(),
+            middleware::origin::enforce,
+        ))
         .with_state(state)
 }

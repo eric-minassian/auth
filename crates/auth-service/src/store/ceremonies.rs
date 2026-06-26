@@ -14,6 +14,12 @@ pub const CEREMONY_TTL_SECS: i64 = 5 * 60;
 pub enum CeremonyPurpose {
     Registration,
     Login,
+    /// First-passkey registration during signup, against a pending account.
+    /// Distinct from `Registration` so an unauthenticated signup ceremony can
+    /// never be cross-consumed by an authenticated add-passkey flow.
+    Signup,
+    /// Step-up re-authentication on an existing full session.
+    Reauth,
 }
 
 #[derive(Serialize, Deserialize)]

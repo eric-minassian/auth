@@ -1,8 +1,9 @@
 pub mod ceremonies;
 pub mod credentials;
 pub mod oauth;
-pub mod otp;
+pub mod pow;
 pub mod rate_limit;
+pub mod recovery_codes;
 pub mod schema;
 pub mod sessions;
 pub mod users;
@@ -58,9 +59,9 @@ pub(crate) fn n(v: i64) -> AttributeValue {
 
 /// Single-table DynamoDB repository.
 ///
-/// Key patterns (see CLAUDE.md / docs/research): `USER#<id>`, `EMAIL#<email>`,
+/// Key patterns (see CLAUDE.md / docs/research): `USER#<id>`,
 /// `SESSION#<sha256(sid)>`, `CRED#<cred_id>`, `CLIENT#<id>`,
-/// `CODE#<sha256(code)>`, `RTF#<family_id>`, `OTP#<sha256(email)>#<purpose>`,
+/// `CODE#<sha256(code)>`, `RTF#<family_id>`, `RC#<sha256(code)>`, `POW#<id>`,
 /// `WAC#<id>`, `RL#<class>#<key>`, `KEYRING`. GSI1 lists long-lived child
 /// entities per user. TTL attribute `ttl` is garbage collection only — every
 /// read checks `expires_at`/`*_expires_at` itself.

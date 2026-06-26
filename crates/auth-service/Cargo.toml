@@ -34,6 +34,9 @@ webauthn-rs = { version = "0.5", features = [
   "danger-allow-state-serialisation",
   "conditional-ui",
 ] }
+# Proto types only (re-exported by webauthn-rs): lets us force residentKey=Required
+# on the registration options, since the high-level API hardcodes "discouraged".
+webauthn-rs-core = "0.5"
 jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
 p256 = { version = "0.13", features = ["ecdsa", "pem", "jwk"] }
 sha2 = "0.10"
@@ -43,14 +46,13 @@ subtle = "2"
 # AWS
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 aws-sdk-dynamodb = "1"
-aws-sdk-sesv2 = "1"
 aws-sdk-kms = "1"
 serde_dynamo = { version = "4", features = ["aws-sdk-dynamodb+1"] }
 
 # Domain plumbing
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-garde = { version = "0.23", features = ["derive", "email"] }
+garde = { version = "0.23", features = ["derive"] }
 uuid = { version = "1", features = ["v7", "serde"] }
 time = { version = "0.3", features = ["serde", "formatting", "parsing"] }
 thiserror = "2"

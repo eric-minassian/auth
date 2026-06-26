@@ -16,8 +16,6 @@ pub struct AccessTokenClaims {
     pub iat: i64,
     pub exp: i64,
     pub jti: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub email: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,10 +30,11 @@ pub struct IdTokenClaims {
     pub amr: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nonce: Option<String>,
+    /// `profile` scope only — user-chosen, non-unique, mutable display label.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub email: Option<String>,
+    pub nickname: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub email_verified: Option<bool>,
+    pub updated_at: Option<i64>,
 }
 
 /// OIDC Back-Channel Logout 1.0 token. Spec: MUST contain the events claim,

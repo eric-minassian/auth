@@ -1,11 +1,10 @@
-//! Local dev server: plain axum on 127.0.0.1:8787 against DynamoDB Local,
-//! stdout email, and a persistent dev signing key. Browse the SPA via Vite at
+//! Local dev server: plain axum on 127.0.0.1:8787 against DynamoDB Local, with
+//! a persistent dev signing key. Browse the SPA via Vite at
 //! http://auth.localhost:5173 (it proxies /api, /oauth, /.well-known here).
 
 use std::path::Path;
 
 use auth_service::config::AppConfig;
-use auth_service::email::{Mailer, StdoutMailer};
 use auth_service::jwt::{LocalSigner, Signer};
 use auth_service::state::AppState;
 use auth_service::store::{Store, schema};
@@ -22,7 +21,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cfg = AppConfig::build(
         std::env::var("ISSUER").unwrap_or_else(|_| "http://auth.localhost:5173".to_string()),
         std::env::var("TABLE_NAME").unwrap_or_else(|_| "auth-local".to_string()),
-        true,
         Some(
             std::env::var("DYNAMODB_ENDPOINT")
                 .unwrap_or_else(|_| "http://127.0.0.1:8000".to_string()),
@@ -44,7 +42,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     seed_clients(&store).await?;
 
     let signer = Signer::Local(load_or_generate_dev_key(Path::new(".dev/signing-key.pem"))?);
-    let state = AppState::new(cfg, store, signer, Mailer::Stdout(StdoutMailer::default()))?;
+    let state = AppState::new(cfg, store, signer)?;
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:8787").await?;
     tracing::info!("auth-service listening on http://127.0.0.1:8787");
@@ -83,7 +81,7 @@ async fn seed_clients(
         allowed_origins: vec!["http://localhost:5174".to_string()],
         scopes: vec![
             "openid".to_string(),
-            "email".to_string(),
+            "profile".to_string(),
             "offline_access".to_string(),
         ],
     };

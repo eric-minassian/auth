@@ -22,7 +22,7 @@ fn rp_client() -> OidcClient {
         allowed_origins: vec![],
         scopes: vec![
             "openid".to_string(),
-            "email".to_string(),
+            "profile".to_string(),
             "offline_access".to_string(),
         ],
     }
@@ -190,22 +190,23 @@ async fn recovery_revokes_prior_refresh_tokens() {
     let mut app = TestApp::spawn().await;
     let rt0 = bootstrap(&mut app, "recover@example.com").await;
 
-    // Account recovery (email OTP) is a reset: it revokes prior sessions and
-    // their refresh families, so a mailbox-compromise attacker can't coexist
-    // with the victim's live tokens.
-    app.post(
-        "/api/recovery/start",
-        &serde_json::json!({ "email": "recover@example.com" }),
-    )
-    .await
-    .assert_status(StatusCode::OK);
-    let code = app.take_otp("recover@example.com");
-    app.post(
-        "/api/recovery/verify",
-        &serde_json::json!({ "email": "recover@example.com", "code": code }),
-    )
-    .await
-    .assert_status(StatusCode::OK);
+    // bootstrap ends logged in, so the live full session can mint recovery
+    // codes (a fresh login satisfies the step-up requirement).
+    let res = app
+        .post("/api/account/recovery-codes", &serde_json::json!({}))
+        .await;
+    res.assert_status(StatusCode::OK);
+    let codes: serde_json::Value = res.json();
+    let code = codes["codes"][0]
+        .as_str()
+        .expect("a recovery code")
+        .to_string();
+
+    // Redeeming a code is a reset: it revokes prior sessions and their refresh
+    // families, so a stolen code can't coexist with the victim's live tokens.
+    app.post("/api/recovery/redeem", &serde_json::json!({ "code": code }))
+        .await
+        .assert_status(StatusCode::OK);
 
     let (status, body) = refresh(&app, &rt0, "rp").await;
     assert_eq!(status, StatusCode::BAD_REQUEST);

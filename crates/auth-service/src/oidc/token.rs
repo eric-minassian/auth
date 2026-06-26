@@ -6,9 +6,9 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::{OAuthError, pkce};
-use crate::api::client_ip;
+use crate::api::rate_ip_key;
 use crate::crypto::random_b64u;
-use crate::domain::oauth::{SCOPE_EMAIL, SCOPE_OFFLINE_ACCESS, SCOPE_OPENID, scope_contains};
+use crate::domain::oauth::{SCOPE_OFFLINE_ACCESS, SCOPE_OPENID, SCOPE_PROFILE, scope_contains};
 use crate::domain::user::User;
 use crate::jwt::claims::{
     ACCESS_TOKEN_TTL_SECS, AccessTokenClaims, ID_TOKEN_TTL_SECS, IdTokenClaims,
@@ -57,7 +57,7 @@ pub async fn token(
     headers: HeaderMap,
     Form(req): Form<TokenRequest>,
 ) -> Result<Response, OAuthError> {
-    let ip = client_ip(&headers);
+    let ip = rate_ip_key(&headers);
     if !state
         .store
         .rate_allow(RateClass::TokenIp, &ip)
@@ -230,8 +230,9 @@ async fn refresh(state: &AppState, req: &TokenRequest) -> Result<TokenResponse, 
             scope: &family.scope,
             nonce: None,
             auth_time: session.created_at,
-            // Carry the real authentication methods from the session, not a
-            // hardcoded value — a session may be OTP-only (post-recovery).
+            // Carry the session's real authentication methods rather than a
+            // hardcoded value. Refresh families are only ever backed by full
+            // sessions (login_finish), so today this is always ["webauthn"].
             amr: &session.amr,
             refresh_token: Some(new_token),
         },
@@ -252,7 +253,6 @@ struct MintInput<'a> {
 
 async fn mint(state: &AppState, input: MintInput<'_>) -> Result<TokenResponse, OAuthError> {
     let ts = now();
-    let email_scope = scope_contains(input.scope, SCOPE_EMAIL);
 
     let access = AccessTokenClaims {
         iss: state.cfg.issuer.clone(),
@@ -264,11 +264,11 @@ async fn mint(state: &AppState, input: MintInput<'_>) -> Result<TokenResponse, O
         iat: ts,
         exp: ts + ACCESS_TOKEN_TTL_SECS,
         jti: Uuid::now_v7().to_string(),
-        email: email_scope.then(|| input.user.email.clone()),
     };
     let access_token = state.signer.sign("at+jwt", &access).await?;
 
     let id_token = if scope_contains(input.scope, SCOPE_OPENID) {
+        let profile = scope_contains(input.scope, SCOPE_PROFILE);
         let id = IdTokenClaims {
             iss: state.cfg.issuer.clone(),
             sub: input.user.user_id.to_string(),
@@ -279,8 +279,8 @@ async fn mint(state: &AppState, input: MintInput<'_>) -> Result<TokenResponse, O
             sid: input.sid_hash.to_string(),
             amr: input.amr.to_vec(),
             nonce: input.nonce.map(str::to_string),
-            email: email_scope.then(|| input.user.email.clone()),
-            email_verified: email_scope.then_some(input.user.email_verified),
+            nickname: profile.then(|| input.user.nickname.clone()),
+            updated_at: profile.then_some(input.user.updated_at),
         };
         Some(state.signer.sign("JWT", &id).await?)
     } else {

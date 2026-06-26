@@ -51,6 +51,13 @@ impl Store {
             idle_expires_at: ts + idle,
             absolute_expires_at: ts + absolute,
             amr,
+            // Full sessions are only ever minted by a fresh login assertion, so
+            // creation time is a valid "last verified" stamp. Enroll sessions
+            // carry no assertion.
+            reauth_at: match level {
+                SessionLevel::Full => ts,
+                SessionLevel::Enroll => 0,
+            },
         };
         let item = serde_dynamo::to_item(SessionItem {
             pk: session_pk(&sid_hash),
@@ -112,6 +119,25 @@ impl Store {
             .condition_expression("attribute_exists(PK) AND absolute_expires_at > :now")
             .expression_attribute_values(":now", n(ts))
             .expression_attribute_values(":idle", n(ts + SESSION_IDLE_SECS))
+            .send()
+            .await
+            .map_err(map_sdk_err)?;
+        Ok(())
+    }
+
+    /// Stamp a fresh step-up assertion onto an existing (live) session. Used by
+    /// the WebAuthn re-auth ceremony so subsequent sensitive operations (e.g.
+    /// generating recovery codes) can require a recent assertion.
+    pub async fn set_session_reauth(&self, sid_hash: &str, ts: i64) -> Result<(), StoreError> {
+        self.db
+            .update_item()
+            .table_name(&self.table)
+            .key("PK", s(session_pk(sid_hash)))
+            .key("SK", s("SESSION"))
+            .update_expression("SET reauth_at = :ts")
+            .condition_expression("attribute_exists(PK) AND absolute_expires_at > :now")
+            .expression_attribute_values(":ts", n(ts))
+            .expression_attribute_values(":now", n(now()))
             .send()
             .await
             .map_err(map_sdk_err)?;

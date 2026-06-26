@@ -4,17 +4,25 @@ use super::{Store, StoreError, map_sdk_err, now, s};
 
 /// Fixed-window rate-limit classes. Limits are deliberately generous for a
 /// personal service; the API Gateway stage throttle is the global backstop.
+///
+/// IP-keyed classes are keyed on a /64 prefix for IPv6 (see
+/// [`crate::api::rate_ip_key`]) so a single allocation can't rotate the key,
+/// and are paired with per-ASN classes because IP-only limiting is defeated by
+/// CGNAT and proxy pools. None of these are global caps — a flood can raise
+/// cost but can never deny signup or recovery to the whole user base.
 #[derive(Debug, Clone, Copy)]
 pub enum RateClass {
-    /// OTP emails per email address.
-    OtpSendEmail,
-    /// OTP emails per client IP.
-    OtpSendIp,
-    /// OTP verification attempts per client IP (item-level cap is separate).
-    OtpVerifyIp,
-    /// Failed login finishes per client IP.
+    /// Signup attempts per client IP (/64).
+    SignupIp,
+    /// Signup attempts per origin ASN.
+    SignupAsn,
+    /// Recovery-code redemption attempts per client IP (/64).
+    RecoveryIp,
+    /// Recovery-code redemption attempts per origin ASN.
+    RecoveryAsn,
+    /// Failed login finishes per client IP (/64).
     LoginIp,
-    /// Token endpoint per client IP.
+    /// Token endpoint per client IP (/64).
     TokenIp,
     /// Mutating account-management calls per session.
     AccountSession,
@@ -23,9 +31,10 @@ pub enum RateClass {
 impl RateClass {
     fn name(self) -> &'static str {
         match self {
-            Self::OtpSendEmail => "otp-send-email",
-            Self::OtpSendIp => "otp-send-ip",
-            Self::OtpVerifyIp => "otp-verify-ip",
+            Self::SignupIp => "signup-ip",
+            Self::SignupAsn => "signup-asn",
+            Self::RecoveryIp => "recovery-ip",
+            Self::RecoveryAsn => "recovery-asn",
             Self::LoginIp => "login-ip",
             Self::TokenIp => "token-ip",
             Self::AccountSession => "account-session",
@@ -35,9 +44,10 @@ impl RateClass {
     /// (max requests, window seconds)
     fn limit(self) -> (i64, i64) {
         match self {
-            Self::OtpSendEmail => (3, 3600),
-            Self::OtpSendIp => (10, 3600),
-            Self::OtpVerifyIp => (20, 3600),
+            Self::SignupIp => (30, 3600),
+            Self::SignupAsn => (300, 3600),
+            Self::RecoveryIp => (20, 3600),
+            Self::RecoveryAsn => (200, 3600),
             Self::LoginIp => (20, 3600),
             Self::TokenIp => (60, 60),
             Self::AccountSession => (30, 3600),

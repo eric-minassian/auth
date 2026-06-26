@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use utoipa::ToSchema;
 
+use crate::domain::session::REAUTH_FRESHNESS_SECS;
 use crate::error::ApiError;
 use crate::session::extract::FullSession;
 use crate::session::logout::revoke_session_cascade;
@@ -227,6 +228,7 @@ pub async fn delete_account(
     for s in state.store.list_sessions(user.user_id).await? {
         revoke_session_cascade(&state, &s).await?;
     }
+    state.store.delete_all_recovery_codes(user.user_id).await?;
     state.store.delete_user(&user).await?;
     tracing::info!(target: "audit", event = "account_deleted", user_id = %user.user_id);
 
@@ -234,6 +236,66 @@ pub async fn delete_account(
         jar.add(crate::session::clear_session_cookie(&state.cfg)),
         Json(json!({ "ok": true })),
     ))
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct RecoveryCodes {
+    pub codes: Vec<String>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct RecoveryReadiness {
+    pub passkey_count: usize,
+    pub recovery_codes_remaining: usize,
+}
+
+/// POST /api/account/recovery-codes — (re)generate the account's recovery
+/// codes, returning them exactly once. Requires a recent WebAuthn step-up
+/// (`/api/webauthn/reauth/*`); a fresh login also counts.
+#[utoipa::path(
+    post,
+    path = "/api/account/recovery-codes",
+    tag = "account",
+    responses(
+        (status = 200, body = RecoveryCodes, description = "Newly generated codes (shown once)"),
+        (status = 409, body = super::ErrorResponse, description = "Step-up re-authentication required"),
+    ),
+)]
+pub async fn generate_recovery_codes(
+    State(state): State<AppState>,
+    FullSession(session): FullSession,
+) -> Result<Json<Value>, ApiError> {
+    rate_limit_account(&state, &session.sid_hash).await?;
+    if crate::store::now() - session.reauth_at > REAUTH_FRESHNESS_SECS {
+        return Err(ApiError::Conflict {
+            code: "reauth_required",
+            message: "re-authenticate with a passkey before generating recovery codes".to_string(),
+        });
+    }
+    let codes = state.store.generate_recovery_codes(session.user_id).await?;
+    tracing::info!(target: "audit", event = "recovery_codes_generated", user_id = %session.user_id);
+    Ok(Json(json!({ "codes": codes })))
+}
+
+/// GET /api/account/recovery-readiness — how protected the account is against
+/// device loss (passkey count + remaining recovery codes), for nudging the user
+/// to add a backup passkey or save recovery codes.
+#[utoipa::path(
+    get,
+    path = "/api/account/recovery-readiness",
+    tag = "account",
+    responses((status = 200, body = RecoveryReadiness), (status = 403, body = super::ErrorResponse)),
+)]
+pub async fn recovery_readiness(
+    State(state): State<AppState>,
+    FullSession(session): FullSession,
+) -> Result<Json<Value>, ApiError> {
+    let passkey_count = state.store.list_credentials(session.user_id).await?.len();
+    let recovery_codes_remaining = state.store.count_recovery_codes(session.user_id).await?;
+    Ok(Json(json!({
+        "passkey_count": passkey_count,
+        "recovery_codes_remaining": recovery_codes_remaining,
+    })))
 }
 
 async fn rate_limit_account(state: &AppState, sid_hash: &str) -> Result<(), ApiError> {

@@ -4,7 +4,7 @@ use axum_extra::extract::CookieJar;
 use serde::Deserialize;
 use url::Url;
 
-use crate::domain::oauth::{OidcClient, SCOPE_OPENID, scope_contains};
+use crate::domain::oauth::{OidcClient, SCOPE_OPENID, granted_scopes, scope_contains};
 use crate::domain::session::SessionLevel;
 use crate::state::AppState;
 use crate::store::oauth::AuthCodeData;
@@ -72,8 +72,17 @@ pub async fn authorize(
     {
         return rp_error("invalid_request");
     }
-    let scope = query.scope.clone().unwrap_or_default();
-    if !scope_contains(&scope, SCOPE_OPENID) || !client.allows_scopes(&scope) {
+    // `openid` is required. The granted scope is the intersection of the
+    // request with the client's registration and what we support — unsupported
+    // or unregistered scopes (e.g. a removed `email`, or `offline_access` for a
+    // client not registered for it) are silently dropped, never errored. Only
+    // the granted scope is stored and later echoed/honored.
+    let requested = query.scope.clone().unwrap_or_default();
+    if !scope_contains(&requested, SCOPE_OPENID) {
+        return rp_error("invalid_scope");
+    }
+    let scope = granted_scopes(&requested, &client);
+    if !scope_contains(&scope, SCOPE_OPENID) {
         return rp_error("invalid_scope");
     }
 
@@ -83,6 +92,21 @@ pub async fn authorize(
             Ok(session) => session.filter(|s| s.level == SessionLevel::Full),
             Err(error) => {
                 tracing::error!(?error, "authorize: session lookup failed");
+                return fatal("server_error");
+            }
+        },
+        None => None,
+    };
+
+    // Authoritative account-status gate: a full session must back an active
+    // account (defense-in-depth — also re-checks the pending TTL — so an
+    // incomplete or expired account can never be issued an authorization code).
+    let session = match session {
+        Some(s) => match state.store.get_user(s.user_id).await {
+            Ok(Some(user)) if user.is_active() => Some(s),
+            Ok(_) => None,
+            Err(error) => {
+                tracing::error!(?error, "authorize: user lookup failed");
                 return fatal("server_error");
             }
         },

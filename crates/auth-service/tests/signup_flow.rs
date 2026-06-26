@@ -2,187 +2,109 @@ mod harness;
 
 use axum::http::StatusCode;
 use harness::TestApp;
+use harness::flows::{new_authenticator, register_new_account};
 use serde_json::json;
+use uuid::Uuid;
 
 #[tokio::test]
 async fn signup_end_to_end() {
     let mut app = TestApp::spawn().await;
+    let mut authenticator = new_authenticator();
 
-    // Start: uniform 200, OTP email delivered.
-    let res = app
-        .post("/api/signup/start", &json!({ "email": "eric@example.com" }))
-        .await;
-    res.assert_status(StatusCode::OK);
-    let code = app.take_otp("eric@example.com");
+    // proof-of-work → pending account → first passkey → active account.
+    let user_id = register_new_account(&mut app, "Eric", &mut authenticator).await;
 
-    // Wrong code burns an attempt but does not create anything.
-    let res = app
-        .post(
-            "/api/signup/verify",
-            &json!({ "email": "eric@example.com", "code": "000000" }),
-        )
-        .await;
-    res.assert_status(StatusCode::BAD_REQUEST);
-
-    // Correct code: account + enroll-level session cookie.
-    let res = app
-        .post(
-            "/api/signup/verify",
-            &json!({ "email": "eric@example.com", "code": code }),
-        )
-        .await;
-    res.assert_status(StatusCode::OK);
-    assert!(
-        res.header("set-cookie")
-            .to_str()
-            .is_ok_and(|c| c.contains("auth_session") && c.contains("HttpOnly")),
-        "should set the session cookie"
-    );
-
-    // Enroll session is not enough for whoami (needs a passkey login).
-    let res = app.server.get("/api/session").await;
-    res.assert_status(StatusCode::FORBIDDEN);
-
-    // The OTP was consumed: replaying the same code fails.
-    let res = app
-        .post(
-            "/api/signup/verify",
-            &json!({ "email": "eric@example.com", "code": code }),
-        )
-        .await;
-    res.assert_status(StatusCode::BAD_REQUEST);
-
-    // User exists in the store with the email pointer.
+    let uid = Uuid::parse_str(&user_id).expect("uuid");
     let user = app
         .store
-        .get_user_by_email("eric@example.com")
+        .get_user(uid)
         .await
         .expect("store reachable")
         .expect("user created");
-    assert!(user.email_verified);
-}
+    assert!(user.is_active(), "account should be active after finish");
+    assert_eq!(user.nickname, "Eric");
 
-#[tokio::test]
-async fn signup_start_is_uniform_for_existing_accounts() {
-    let mut app = TestApp::spawn().await;
-
-    // Create the account.
-    app.post("/api/signup/start", &json!({ "email": "a@example.com" }))
+    // Enroll session alone is not enough for whoami (needs a passkey login).
+    app.server
+        .get("/api/session")
         .await
-        .assert_status(StatusCode::OK);
-    let code = app.take_otp("a@example.com");
-    app.post(
-        "/api/signup/verify",
-        &json!({ "email": "a@example.com", "code": code }),
-    )
-    .await
-    .assert_status(StatusCode::OK);
+        .assert_status(StatusCode::FORBIDDEN);
 
-    // Second signup start: same 200, but the email is a notice, not an OTP.
-    let res = app
-        .post("/api/signup/start", &json!({ "email": "a@example.com" }))
-        .await;
+    // Establish a full session (the discoverable login ceremony itself is
+    // covered by the Playwright e2e — see TestApp::login_as).
+    app.login_as(uid).await;
+    let res = app.server.get("/api/session").await;
     res.assert_status(StatusCode::OK);
-    let email = app
-        .last_email_to("a@example.com")
-        .expect("notice email sent");
-    assert!(
-        harness::extract_otp(&email.text).is_none(),
-        "no OTP for existing accounts"
-    );
+    let body: serde_json::Value = res.json();
+    assert_eq!(body["user"]["nickname"], "Eric");
 }
 
 #[tokio::test]
-async fn otp_attempts_are_capped() {
-    let mut app = TestApp::spawn().await;
+async fn signup_rejects_bad_proof_of_work() {
+    let app = TestApp::spawn().await;
 
-    app.post("/api/signup/start", &json!({ "email": "cap@example.com" }))
-        .await
-        .assert_status(StatusCode::OK);
-    let code = app.take_otp("cap@example.com");
-
-    for _ in 0..5 {
-        app.post(
-            "/api/signup/verify",
-            &json!({ "email": "cap@example.com", "code": "999999" }),
-        )
-        .await
-        .assert_status(StatusCode::BAD_REQUEST);
-    }
-    // Attempt cap reached: even the correct code is rejected now.
+    // A challenge that was never issued.
     let res = app
         .post(
-            "/api/signup/verify",
-            &json!({ "email": "cap@example.com", "code": code }),
+            "/api/signup/start",
+            &json!({ "nickname": "x", "pow_challenge": "never-issued", "pow_nonce": "0" }),
+        )
+        .await;
+    res.assert_status(StatusCode::BAD_REQUEST);
+
+    // A real challenge but a nonce that doesn't meet the difficulty.
+    let body: serde_json::Value = app.server.get("/api/signup/pow").await.json();
+    let challenge = body["challenge"].as_str().expect("challenge").to_string();
+    let res = app
+        .post(
+            "/api/signup/start",
+            &json!({ "nickname": "x", "pow_challenge": challenge, "pow_nonce": "not-a-solution" }),
         )
         .await;
     res.assert_status(StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
-async fn recovery_flow_issues_enroll_session() {
-    let mut app = TestApp::spawn().await;
+async fn pow_challenge_is_single_use() {
+    let app = TestApp::spawn().await;
+    let (challenge, nonce) = app.solve_signup_pow().await;
 
-    // Existing account.
-    app.post("/api/signup/start", &json!({ "email": "r@example.com" }))
-        .await
-        .assert_status(StatusCode::OK);
-    let code = app.take_otp("r@example.com");
+    // First use starts a ceremony.
     app.post(
-        "/api/signup/verify",
-        &json!({ "email": "r@example.com", "code": code }),
+        "/api/signup/start",
+        &json!({ "nickname": "Once", "pow_challenge": challenge.clone(), "pow_nonce": nonce.clone() }),
     )
     .await
     .assert_status(StatusCode::OK);
 
-    // Recovery for an unknown email: uniform 200, no email at all.
+    // Reusing the same solved challenge fails — it was consumed.
     app.post(
-        "/api/recovery/start",
-        &json!({ "email": "ghost@example.com" }),
+        "/api/signup/start",
+        &json!({ "nickname": "Twice", "pow_challenge": challenge, "pow_nonce": nonce }),
     )
     .await
-    .assert_status(StatusCode::OK);
-    assert!(app.last_email_to("ghost@example.com").is_none());
-
-    // Recovery for the real account.
-    app.post("/api/recovery/start", &json!({ "email": "r@example.com" }))
-        .await
-        .assert_status(StatusCode::OK);
-    let code = app.take_otp("r@example.com");
-    let res = app
-        .post(
-            "/api/recovery/verify",
-            &json!({ "email": "r@example.com", "code": code }),
-        )
-        .await;
-    res.assert_status(StatusCode::OK);
-
-    // Logout works from an enroll session.
-    app.post("/api/session/logout", &json!({}))
-        .await
-        .assert_status(StatusCode::OK);
+    .assert_status(StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
 async fn csrf_rejects_cross_origin_posts() {
     let app = TestApp::spawn().await;
+    let body = json!({ "nickname": "x", "pow_challenge": "c", "pow_nonce": "0" });
 
     // No Origin header.
-    let res = app
-        .server
+    app.server
         .post("/api/signup/start")
-        .json(&json!({ "email": "x@example.com" }))
-        .await;
-    res.assert_status(StatusCode::FORBIDDEN);
+        .json(&body)
+        .await
+        .assert_status(StatusCode::FORBIDDEN);
 
     // Wrong Origin.
-    let res = app
-        .server
+    app.server
         .post("/api/signup/start")
         .add_header("origin", "https://evil.example.com")
-        .json(&json!({ "email": "x@example.com" }))
-        .await;
-    res.assert_status(StatusCode::FORBIDDEN);
+        .json(&body)
+        .await
+        .assert_status(StatusCode::FORBIDDEN);
 
     // GETs are exempt.
     app.server
