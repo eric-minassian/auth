@@ -145,6 +145,11 @@ export class AuthAppStack extends cdk.Stack {
       {
         cookieBehavior: cloudfront.OriginRequestCookieBehavior.all(),
         queryStringBehavior: cloudfront.OriginRequestQueryStringBehavior.all(),
+        // CloudFront caps an origin-request policy at 10 forwarded headers, so
+        // this list must stay at or below 10. Only headers the backend actually
+        // reads are forwarded: the CSRF check uses Origin + Sec-Fetch-Site (not
+        // -Mode/-Dest, which were dropped to make room), rate limiting uses the
+        // Viewer-Address/ASN, the session list uses User-Agent + Viewer-Country.
         headerBehavior: cloudfront.OriginRequestHeaderBehavior.allowList(
           "CloudFront-Viewer-Address",
           "CloudFront-Viewer-ASN",
@@ -157,8 +162,6 @@ export class AuthAppStack extends cdk.Stack {
           "Referer",
           "User-Agent",
           "Sec-Fetch-Site",
-          "Sec-Fetch-Mode",
-          "Sec-Fetch-Dest",
         ),
       },
     );
