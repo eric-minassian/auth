@@ -218,6 +218,56 @@ describe("AuthApp", () => {
     });
   });
 
+  it("fronts the distribution with a WAF web ACL (rate limit + managed rules)", () => {
+    app.hasResourceProperties("AWS::WAFv2::WebACL", {
+      Scope: "CLOUDFRONT",
+      DefaultAction: { Allow: {} },
+      Rules: Match.arrayWith([
+        Match.objectLike({
+          Name: "RateLimit",
+          Action: { Block: {} },
+          Statement: { RateBasedStatement: Match.objectLike({ AggregateKeyType: "IP" }) },
+        }),
+        Match.objectLike({
+          Statement: {
+            ManagedRuleGroupStatement: Match.objectLike({
+              Name: "AWSManagedRulesAmazonIpReputationList",
+            }),
+          },
+        }),
+      ]),
+    });
+    app.hasResourceProperties("AWS::CloudFront::Distribution", {
+      DistributionConfig: Match.objectLike({ WebACLId: Match.anyValue() }),
+    });
+  });
+
+  it("alarms on token-theft audit signals via metric filters → SNS", () => {
+    app.hasResourceProperties("AWS::Logs::MetricFilter", {
+      FilterPattern: Match.stringLikeRegexp("refresh_reuse_detected"),
+      MetricTransformations: Match.arrayWith([
+        Match.objectLike({ MetricNamespace: "Auth/Audit", MetricName: "RefreshReuse" }),
+      ]),
+    });
+    app.hasResourceProperties("AWS::Logs::MetricFilter", {
+      FilterPattern: Match.stringLikeRegexp("code_replayed"),
+    });
+    app.resourceCountIs("AWS::SNS::Topic", 1);
+    // Reuse/replay alarm on the first occurrence.
+    app.hasResourceProperties("AWS::CloudWatch::Alarm", {
+      MetricName: "RefreshReuse",
+      Threshold: 1,
+      ComparisonOperator: "GreaterThanOrEqualToThreshold",
+    });
+  });
+
+  it("retains the audit log group (off DESTROY) for forensics", () => {
+    app.hasResource("AWS::Logs::LogGroup", {
+      DeletionPolicy: "Retain",
+      Properties: Match.objectLike({ RetentionInDays: 180 }),
+    });
+  });
+
   it("sets HSTS + no-referrer on the API surface without frame-denying it", () => {
     // /oauth/authorize must stay iframe-able for the SDK's silent-auth flow, so
     // the API headers policy carries HSTS + Referrer-Policy but no FrameOptions.

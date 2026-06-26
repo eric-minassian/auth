@@ -13,7 +13,7 @@ use webauthn_rs::prelude::{
 };
 use webauthn_rs_core::proto::ResidentKeyRequirement;
 
-use super::rate_ip_key;
+use super::{client_asn, rate_ip_key};
 use crate::crypto::b64u;
 use crate::domain::session::{IdpSession, REAUTH_FRESHNESS_SECS, SessionLevel};
 use crate::error::ApiError;
@@ -278,7 +278,7 @@ pub async fn login_finish(
             // Count failures against the IP so assertion-guessing burns the
             // login budget; result deliberately uniform.
             let _ = state.store.rate_allow(RateClass::LoginIp, &ip).await;
-            tracing::info!(target: "audit", event = "login_failed");
+            tracing::info!(target: "audit", event = "login_failed", ip = %ip, asn = client_asn(&headers).as_deref());
             return Err(e);
         }
     };

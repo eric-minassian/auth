@@ -5,6 +5,8 @@ import * as cdk from "aws-cdk-lib";
 import * as acm from "aws-cdk-lib/aws-certificatemanager";
 import * as cloudfront from "aws-cdk-lib/aws-cloudfront";
 import * as origins from "aws-cdk-lib/aws-cloudfront-origins";
+import * as cloudwatch from "aws-cdk-lib/aws-cloudwatch";
+import * as cloudwatchActions from "aws-cdk-lib/aws-cloudwatch-actions";
 import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
 import * as apigwv2 from "aws-cdk-lib/aws-apigatewayv2";
 import * as integrations from "aws-cdk-lib/aws-apigatewayv2-integrations";
@@ -15,8 +17,11 @@ import * as logs from "aws-cdk-lib/aws-logs";
 import * as route53 from "aws-cdk-lib/aws-route53";
 import * as targets from "aws-cdk-lib/aws-route53-targets";
 import * as secretsmanager from "aws-cdk-lib/aws-secretsmanager";
+import * as sns from "aws-cdk-lib/aws-sns";
+import * as snsSubscriptions from "aws-cdk-lib/aws-sns-subscriptions";
 import * as s3 from "aws-cdk-lib/aws-s3";
 import * as s3deploy from "aws-cdk-lib/aws-s3-deployment";
+import * as wafv2 from "aws-cdk-lib/aws-wafv2";
 import * as cr from "aws-cdk-lib/custom-resources";
 import type { Construct } from "constructs";
 
@@ -77,6 +82,13 @@ export class AuthAppStack extends cdk.Stack {
     const originVerifyValue = originVerifySecret.secretValue.unsafeUnwrap();
 
     // --- Rust Lambda (Lambdalith) ---
+    // Audit events (target="audit") are emitted here as JSON; RETAIN keeps the
+    // forensic trail across stack replacement/teardown, and the metric filters
+    // below alarm on the compromise signals in it.
+    const apiLogs = new logs.LogGroup(this, "ApiLogs", {
+      retention: logs.RetentionDays.SIX_MONTHS,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
     const fn = new lambda.Function(this, "Api", {
       runtime: lambda.Runtime.PROVIDED_AL2023,
       handler: "bootstrap",
@@ -91,10 +103,7 @@ export class AuthAppStack extends cdk.Stack {
         ORIGIN_VERIFY_SECRET: originVerifyValue,
         RUST_LOG: "info",
       },
-      logGroup: new logs.LogGroup(this, "ApiLogs", {
-        retention: logs.RetentionDays.THREE_MONTHS,
-        removalPolicy: cdk.RemovalPolicy.DESTROY,
-      }),
+      logGroup: apiLogs,
     });
     props.table.grantReadWriteData(fn);
     props.signingKey.grant(fn, "kms:Sign", "kms:GetPublicKey");
@@ -277,9 +286,59 @@ export class AuthAppStack extends cdk.Stack {
       },
     });
 
+    // --- AWS WAF (CLOUDFRONT scope ⇒ must live in us-east-1, where this stack
+    // is) shed floods/bots at the edge before they reach Lambda/DynamoDB. The
+    // rate-based rule and IP-reputation list BLOCK; the broad managed rule sets
+    // run in COUNT first (Report-Only-style staging) so we can confirm they
+    // don't false-positive on WebAuthn attestation bodies or DPoP proof headers
+    // before flipping them to block. ---
+    const managedRule = (
+      name: string,
+      priority: number,
+      block: boolean,
+    ): wafv2.CfnWebACL.RuleProperty => ({
+      name,
+      priority,
+      overrideAction: block ? { none: {} } : { count: {} },
+      statement: { managedRuleGroupStatement: { vendorName: "AWS", name } },
+      visibilityConfig: {
+        sampledRequestsEnabled: true,
+        cloudWatchMetricsEnabled: true,
+        metricName: name,
+      },
+    });
+    const webAcl = new wafv2.CfnWebACL(this, "WebAcl", {
+      scope: "CLOUDFRONT",
+      defaultAction: { allow: {} },
+      visibilityConfig: {
+        sampledRequestsEnabled: true,
+        cloudWatchMetricsEnabled: true,
+        metricName: "AuthWebAcl",
+      },
+      rules: [
+        {
+          name: "RateLimit",
+          priority: 0,
+          action: { block: {} },
+          // Per-IP cap over a 5-minute sliding window. Generous vs. a real user
+          // (a page load is ~10–20 requests); a flood blows past it.
+          statement: { rateBasedStatement: { limit: 2000, aggregateKeyType: "IP" } },
+          visibilityConfig: {
+            sampledRequestsEnabled: true,
+            cloudWatchMetricsEnabled: true,
+            metricName: "RateLimit",
+          },
+        },
+        managedRule("AWSManagedRulesAmazonIpReputationList", 1, true),
+        managedRule("AWSManagedRulesCommonRuleSet", 2, false),
+        managedRule("AWSManagedRulesKnownBadInputsRuleSet", 3, false),
+      ],
+    });
+
     const distribution = new cloudfront.Distribution(this, "Distribution", {
       domainNames: [host],
       certificate,
+      webAclId: webAcl.attrArn,
       minimumProtocolVersion: cloudfront.SecurityPolicyProtocol.TLS_V1_2_2021,
       httpVersion: cloudfront.HttpVersion.HTTP2_AND_3,
       defaultRootObject: "index.html",
@@ -352,7 +411,47 @@ export class AuthAppStack extends cdk.Stack {
     new route53.ARecord(this, "AliasA", { zone: props.hostedZone, target: recordTarget });
     new route53.AaaaRecord(this, "AliasAaaa", { zone: props.hostedZone, target: recordTarget });
 
+    // --- Security alerting: alarm on the compromise signals in the audit log.
+    // refresh-token reuse and auth-code replay are auto-revoked by the backend
+    // but otherwise silent; these surface them to an operator. The topic has no
+    // committed subscriber (public repo) — subscribe out-of-band, or pass
+    // `-c alertEmail=you@example.com` at deploy time. ---
+    const alarmTopic = new sns.Topic(this, "SecurityAlarms", {
+      displayName: "auth.ericminassian.com security alarms",
+    });
+    const alertEmail = this.node.tryGetContext("alertEmail");
+    if (typeof alertEmail === "string" && alertEmail.length > 0) {
+      alarmTopic.addSubscription(new snsSubscriptions.EmailSubscription(alertEmail));
+    }
+
+    // Each audit event is one JSON log line (`{"...","fields":{"event":...}}`);
+    // count occurrences of the named event and alarm when they breach.
+    const auditAlarm = (id: string, event: string, threshold: number): void => {
+      const filter = new logs.MetricFilter(this, `${id}Filter`, {
+        logGroup: apiLogs,
+        filterPattern: logs.FilterPattern.stringValue("$.fields.event", "=", event),
+        metricNamespace: "Auth/Audit",
+        metricName: id,
+        metricValue: "1",
+        defaultValue: 0,
+      });
+      new cloudwatch.Alarm(this, `${id}Alarm`, {
+        metric: filter.metric({ statistic: "Sum", period: cdk.Duration.minutes(5) }),
+        threshold,
+        evaluationPeriods: 1,
+        comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+        alarmDescription: `audit: '${event}' >= ${threshold} in 5 min`,
+      }).addAlarmAction(new cloudwatchActions.SnsAction(alarmTopic));
+    };
+    // Token theft is a near-certain compromise: alarm on the first occurrence.
+    auditAlarm("RefreshReuse", "refresh_reuse_detected", 1);
+    auditAlarm("CodeReplay", "code_replayed", 1);
+    // Failed logins are normal in ones; a burst signals credential stuffing.
+    auditAlarm("LoginFailures", "login_failed", 50);
+
     new cdk.CfnOutput(this, "Issuer", { value: issuerUrl(config) });
     new cdk.CfnOutput(this, "DistributionDomain", { value: distribution.distributionDomainName });
+    new cdk.CfnOutput(this, "SecurityAlarmsTopicArn", { value: alarmTopic.topicArn });
   }
 }
