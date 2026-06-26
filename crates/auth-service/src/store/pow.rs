@@ -50,10 +50,7 @@ impl Store {
     /// Atomically consume a PoW challenge (one-time-use via conditional delete
     /// with `ALL_OLD`). Returns the required difficulty if the challenge
     /// existed and is unexpired; `None` otherwise.
-    pub async fn consume_pow_challenge(
-        &self,
-        challenge: &str,
-    ) -> Result<Option<u32>, StoreError> {
+    pub async fn consume_pow_challenge(&self, challenge: &str) -> Result<Option<u32>, StoreError> {
         let result = self
             .db
             .delete_item()

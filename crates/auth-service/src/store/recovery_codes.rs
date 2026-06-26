@@ -37,10 +37,7 @@ impl Store {
     /// for one-time display) BEFORE the previous generation is swept, so a
     /// crash can never leave the user with zero valid codes. Returns the
     /// plaintext display codes — caller must reveal them exactly once.
-    pub async fn generate_recovery_codes(
-        &self,
-        user_id: Uuid,
-    ) -> Result<Vec<String>, StoreError> {
+    pub async fn generate_recovery_codes(&self, user_id: Uuid) -> Result<Vec<String>, StoreError> {
         // Snapshot existing codes to sweep after the new set is durable.
         let stale = self.list_recovery_code_pks(user_id).await?;
 

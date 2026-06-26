@@ -15,10 +15,10 @@ use auth_service::store::{Store, schema};
 use axum::http::StatusCode;
 use axum_extra::extract::cookie::Cookie;
 use axum_test::TestServer;
-use uuid::Uuid;
 use testcontainers::ContainerAsync;
 use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::dynamodb_local::DynamoDb;
+use uuid::Uuid;
 
 // Plain `localhost`: webauthn-authenticator-rs only permits http origins for
 // the literal localhost domain (browsers are more lenient with *.localhost).
@@ -59,11 +59,11 @@ impl TestApp {
             .expect("create table");
         let store = Store::new(db, table);
 
-        let cfg = AppConfig::build(ISSUER.to_string(), table.to_string(), None)
-            .expect("test config");
+        let cfg =
+            AppConfig::build(ISSUER.to_string(), table.to_string(), None).expect("test config");
         let signer = LocalSigner::generate();
-        let state = AppState::new(cfg, store.clone(), Signer::Local(signer.clone()))
-            .expect("app state");
+        let state =
+            AppState::new(cfg, store.clone(), Signer::Local(signer.clone())).expect("app state");
 
         let server = TestServer::builder()
             .save_cookies()

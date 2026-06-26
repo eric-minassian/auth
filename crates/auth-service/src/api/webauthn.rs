@@ -8,7 +8,8 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 use webauthn_rs::prelude::{
     CreationChallengeResponse, DiscoverableAuthentication, PasskeyAuthentication,
-    PasskeyRegistration, PublicKeyCredential, RegisterPublicKeyCredential, RequestChallengeResponse,
+    PasskeyRegistration, PublicKeyCredential, RegisterPublicKeyCredential,
+    RequestChallengeResponse,
 };
 use webauthn_rs_core::proto::ResidentKeyRequirement;
 
@@ -79,7 +80,11 @@ pub async fn register_start(
     prefer_discoverable_credential(&mut options);
     let ceremony_id = state
         .store
-        .put_ceremony(CeremonyPurpose::Registration, Some(user.user_id), &reg_state)
+        .put_ceremony(
+            CeremonyPurpose::Registration,
+            Some(user.user_id),
+            &reg_state,
+        )
         .await?;
     Ok(Json(RegisterStartResponse {
         ceremony_id,
@@ -335,7 +340,9 @@ pub async fn reauth_start(
         .map(|c| c.passkey)
         .collect::<Vec<_>>();
     if credentials.is_empty() {
-        return Err(ApiError::BadRequest("no passkeys to re-authenticate with".to_string()));
+        return Err(ApiError::BadRequest(
+            "no passkeys to re-authenticate with".to_string(),
+        ));
     }
     let (options, auth_state) = state
         .webauthn
@@ -418,9 +425,7 @@ pub async fn reauth_finish(
 /// sessions (freshly minted by signup/recovery, and only able to register) are
 /// exempt.
 fn require_stepup_for_full(session: &IdpSession) -> Result<(), ApiError> {
-    if session.level == SessionLevel::Full
-        && now() - session.reauth_at > REAUTH_FRESHNESS_SECS
-    {
+    if session.level == SessionLevel::Full && now() - session.reauth_at > REAUTH_FRESHNESS_SECS {
         return Err(ApiError::Conflict {
             code: "reauth_required",
             message: "re-authenticate with a passkey before adding a credential".to_string(),
