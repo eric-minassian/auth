@@ -49,16 +49,6 @@ export function issuerUrl(config: AuthConfig): string {
   return `https://${authHost(config)}`;
 }
 
-/** `mail.auth.<domain>` — the SES custom MAIL FROM subdomain (inside our zone). */
-export function mailFromDomain(config: AuthConfig): string {
-  return `mail.${authHost(config)}`;
-}
-
-/** No-reply sender on the auth host. */
-export function emailFrom(config: AuthConfig): string {
-  return `no-reply@${authHost(config)}`;
-}
-
 /**
  * ARN of the org-management role this env assumes to register its `NS`
  * delegation in the parent zone.

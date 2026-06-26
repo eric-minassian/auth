@@ -16,8 +16,8 @@ import { authHost, delegationRoleArn, type AuthConfig } from "../../config/types
  * - the KMS asymmetric key used to sign JWTs.
  *
  * Deploy this first: it creates the zone and registers its `NS` delegation in
- * the parent zone (cross-account, automated). The app stack's ACM/SES DNS
- * validation depends on that delegation having propagated.
+ * the parent zone (cross-account, automated). The app stack's ACM certificate
+ * DNS validation depends on that delegation having propagated.
  */
 export class AuthStatefulStack extends cdk.Stack {
   readonly hostedZone: route53.IHostedZone;

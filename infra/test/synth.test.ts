@@ -88,6 +88,18 @@ describe("AuthApp", () => {
     });
   });
 
+  it("injects the CloudFront origin-lock secret into the Lambda env", () => {
+    // The backend fails open if ORIGIN_VERIFY_SECRET is unset, so the env var
+    // must always be present; its value is a resolved Secrets Manager reference.
+    app.hasResourceProperties("AWS::Lambda::Function", {
+      Environment: {
+        Variables: Match.objectLike({
+          ORIGIN_VERIFY_SECRET: Match.anyValue(),
+        }),
+      },
+    });
+  });
+
   it("grants the Lambda only kms:Sign and kms:GetPublicKey on the key", () => {
     app.hasResourceProperties("AWS::IAM::Policy", {
       PolicyDocument: {
@@ -110,6 +122,37 @@ describe("AuthApp", () => {
           Match.objectLike({ PathPattern: "/oauth/*" }),
           Match.objectLike({ PathPattern: "/.well-known/*" }),
         ]),
+      }),
+    });
+  });
+
+  it("stamps the origin-lock header on the API origin", () => {
+    // CloudFront must inject `x-origin-verify` on every request to the API
+    // origin so the backend can prove the request came through the distribution
+    // (not directly via the public execute-api endpoint). The header name must
+    // match the Rust middleware exactly.
+    app.hasResourceProperties("AWS::CloudFront::Distribution", {
+      DistributionConfig: Match.objectLike({
+        Origins: Match.arrayWith([
+          Match.objectLike({
+            OriginCustomHeaders: Match.arrayWith([
+              Match.objectLike({ HeaderName: "x-origin-verify" }),
+            ]),
+          }),
+        ]),
+      }),
+    });
+  });
+
+  it("forwards the viewer ASN to the API origin for per-ASN rate limiting", () => {
+    // The Rust backend rate-limits per source network using the tamper-proof
+    // CloudFront-Viewer-ASN header, so the API origin request policy must
+    // forward it (alongside CloudFront-Viewer-Address).
+    app.hasResourceProperties("AWS::CloudFront::OriginRequestPolicy", {
+      OriginRequestPolicyConfig: Match.objectLike({
+        HeadersConfig: Match.objectLike({
+          Headers: Match.arrayWith(["CloudFront-Viewer-Address", "CloudFront-Viewer-ASN"]),
+        }),
       }),
     });
   });
