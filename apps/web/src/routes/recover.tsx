@@ -7,11 +7,13 @@ import { Link, createRoute, useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
 
 import { AuthCard } from "../components/AuthCard.js";
+import { useTitle } from "../hooks/useTitle.js";
 import { ApiError } from "../lib/api.js";
 import { loginWithPasskey, redeemRecoveryCode, registerPasskey } from "../lib/webauthn.js";
-import { rootRoute } from "./root.js";
+import { centeredLayoutRoute } from "./_centered.js";
 
 function Recover() {
+  useTitle("Recover account");
   const navigate = useNavigate();
   const [code, setCode] = useState("");
   const [busy, setBusy] = useState(false);
@@ -30,10 +32,9 @@ function Recover() {
         );
       }
       await loginWithPasskey();
-      // Signal the account page to issue replacement codes immediately — the
-      // user has just completed a user-verifying assertion.
-      sessionStorage.setItem("ema_post_recovery", "1");
-      void navigate({ to: "/account" });
+      // The user just completed a user-verifying assertion, so drop them
+      // straight into generating replacement codes via a typed search param.
+      void navigate({ to: "/account", search: { tab: "recovery", generate: true } });
     } catch (e) {
       setError(
         e instanceof ApiError ? e.message : "Recovery failed. Check the code and try again.",
@@ -71,11 +72,16 @@ function Recover() {
           }}
         />
       </Field>
-      <p className="text-muted-foreground text-sm">
+      <p className="text-muted-foreground text-xs/relaxed">
         Each code works once and signs you out everywhere. After recovering, save
         a fresh set of codes from your account.
       </p>
-      <Button onClick={() => void recover()} disabled={busy || !code.trim()}>
+      <Button
+        onClick={() => void recover()}
+        disabled={busy || !code.trim()}
+        size="lg"
+        className="w-full"
+      >
         {busy ? <Spinner /> : null}
         Recover &amp; add a passkey
       </Button>
@@ -84,7 +90,7 @@ function Recover() {
 }
 
 export const recoverRoute = createRoute({
-  getParentRoute: () => rootRoute,
+  getParentRoute: () => centeredLayoutRoute,
   path: "/recover",
   component: Recover,
 });

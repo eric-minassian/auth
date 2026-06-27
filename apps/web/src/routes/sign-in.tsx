@@ -5,15 +5,17 @@ import { Link, createRoute } from "@tanstack/react-router";
 import { useEffect, useRef, useState } from "react";
 
 import { AuthCard } from "../components/AuthCard.js";
+import { useTitle } from "../hooks/useTitle.js";
 import { resumeAfterLogin } from "../lib/return-to.js";
 import { loginWithPasskey, supportsConditionalUi } from "../lib/webauthn.js";
-import { rootRoute } from "./root.js";
+import { centeredLayoutRoute } from "./_centered.js";
 
 interface SignInSearch {
   return_to?: string;
 }
 
 function SignIn() {
+  useTitle("Sign in");
   const { return_to } = signInRoute.useSearch();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | undefined>();
@@ -73,11 +75,11 @@ function SignIn() {
           <AlertDescription>{error}</AlertDescription>
         </Alert>
       ) : null}
-      <Button onClick={signIn} disabled={busy}>
+      <Button onClick={signIn} disabled={busy} size="lg" className="w-full">
         {busy ? <Spinner /> : null}
         Sign in with a passkey
       </Button>
-      <Link to="/recover" className="text-muted-foreground text-center text-sm underline">
+      <Link to="/recover" className="text-muted-foreground text-center text-xs underline">
         Lost access to your passkey?
       </Link>
     </AuthCard>
@@ -85,7 +87,7 @@ function SignIn() {
 }
 
 export const signInRoute = createRoute({
-  getParentRoute: () => rootRoute,
+  getParentRoute: () => centeredLayoutRoute,
   path: "/sign-in",
   validateSearch: (search: Record<string, unknown>): SignInSearch => ({
     return_to: typeof search.return_to === "string" ? search.return_to : undefined,
