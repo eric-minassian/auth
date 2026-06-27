@@ -1,7 +1,15 @@
-import { Empty, EmptyDescription, EmptyTitle } from "@eric-minassian/design/components/empty";
-import { createRoute } from "@tanstack/react-router";
+import { Button } from "@eric-minassian/design/components/button";
+import {
+  Empty,
+  EmptyContent,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyTitle,
+} from "@eric-minassian/design/components/empty";
+import { createRoute, Link } from "@tanstack/react-router";
 
-import { rootRoute } from "./root.js";
+import { useTitle } from "../hooks/useTitle.js";
+import { centeredLayoutRoute } from "./_centered.js";
 
 interface ErrorSearch {
   error?: string;
@@ -14,18 +22,28 @@ const MESSAGES: Record<string, string> = {
 };
 
 function ErrorPage() {
+  useTitle("Can't sign you in");
   const { error } = errorRoute.useSearch();
   const message = (error && MESSAGES[error]) ?? "This sign-in request can't be completed.";
   return (
     <Empty className="max-w-sm">
-      <EmptyTitle>Can't sign you in</EmptyTitle>
-      <EmptyDescription>{message}</EmptyDescription>
+      <EmptyHeader>
+        <EmptyTitle>
+          <h1>Can&apos;t sign you in</h1>
+        </EmptyTitle>
+        <EmptyDescription>{message}</EmptyDescription>
+      </EmptyHeader>
+      <EmptyContent>
+        <Button size="sm" variant="outline" asChild>
+          <Link to="/sign-in">Back to sign in</Link>
+        </Button>
+      </EmptyContent>
     </Empty>
   );
 }
 
 export const errorRoute = createRoute({
-  getParentRoute: () => rootRoute,
+  getParentRoute: () => centeredLayoutRoute,
   path: "/error",
   validateSearch: (search: Record<string, unknown>): ErrorSearch => ({
     error: typeof search.error === "string" ? search.error : undefined,

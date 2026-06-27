@@ -7,16 +7,18 @@ import { Link, createRoute } from "@tanstack/react-router";
 import { useState } from "react";
 
 import { AuthCard } from "../components/AuthCard.js";
+import { useTitle } from "../hooks/useTitle.js";
 import { ApiError } from "../lib/api.js";
 import { resumeAfterLogin } from "../lib/return-to.js";
 import { loginWithPasskey, signUp } from "../lib/webauthn.js";
-import { rootRoute } from "./root.js";
+import { centeredLayoutRoute } from "./_centered.js";
 
 interface SignUpSearch {
   return_to?: string;
 }
 
 function SignUp() {
+  useTitle("Create account");
   const { return_to } = signUpRoute.useSearch();
   const [nickname, setNickname] = useState("");
   const [busy, setBusy] = useState(false);
@@ -76,7 +78,12 @@ function SignUp() {
           }}
         />
       </Field>
-      <Button onClick={() => void createAccount()} disabled={busy || !nickname.trim()}>
+      <Button
+        onClick={() => void createAccount()}
+        disabled={busy || !nickname.trim()}
+        size="lg"
+        className="w-full"
+      >
         {busy ? <Spinner /> : null}
         Create account &amp; passkey
       </Button>
@@ -85,7 +92,7 @@ function SignUp() {
 }
 
 export const signUpRoute = createRoute({
-  getParentRoute: () => rootRoute,
+  getParentRoute: () => centeredLayoutRoute,
   path: "/sign-up",
   validateSearch: (search: Record<string, unknown>): SignUpSearch => ({
     return_to: typeof search.return_to === "string" ? search.return_to : undefined,

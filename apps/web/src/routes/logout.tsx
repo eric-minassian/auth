@@ -4,8 +4,9 @@ import { createRoute } from "@tanstack/react-router";
 import { useState } from "react";
 
 import { AuthCard } from "../components/AuthCard.js";
+import { useTitle } from "../hooks/useTitle.js";
 import { api } from "../lib/api.js";
-import { rootRoute } from "./root.js";
+import { centeredLayoutRoute } from "./_centered.js";
 
 /**
  * Confirmation page reached when `/oauth/logout` could not verify an
@@ -13,6 +14,7 @@ import { rootRoute } from "./root.js";
  * POST, never on the bare GET.
  */
 function Logout() {
+  useTitle("Sign out");
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState(false);
 
@@ -32,9 +34,17 @@ function Logout() {
       description={done ? "You've been signed out." : "Sign out of this account everywhere?"}
     >
       {done ? (
-        <Button onClick={() => location.assign("/sign-in")}>Back to sign in</Button>
+        <Button size="lg" className="w-full" onClick={() => location.assign("/sign-in")}>
+          Back to sign in
+        </Button>
       ) : (
-        <Button variant="destructive" onClick={signOutEverywhere} disabled={busy}>
+        <Button
+          variant="destructive"
+          size="lg"
+          className="w-full"
+          onClick={signOutEverywhere}
+          disabled={busy}
+        >
           {busy ? <Spinner /> : null}
           Sign out
         </Button>
@@ -44,7 +54,7 @@ function Logout() {
 }
 
 export const logoutRoute = createRoute({
-  getParentRoute: () => rootRoute,
+  getParentRoute: () => centeredLayoutRoute,
   path: "/logout",
   component: Logout,
 });

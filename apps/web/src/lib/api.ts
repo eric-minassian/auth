@@ -21,7 +21,17 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   });
   if (response.status === 204) return undefined as T;
   const text = await response.text();
-  const data = text ? (JSON.parse(text) as unknown) : undefined;
+  // Guard JSON.parse: a 502/timeout often returns an HTML body, which would
+  // otherwise throw an opaque SyntaxError that masks the real status code.
+  let data: unknown;
+  try {
+    data = text ? (JSON.parse(text) as unknown) : undefined;
+  } catch {
+    if (!response.ok) {
+      throw new ApiError(response.status, "error", response.statusText || "Request failed");
+    }
+    throw new ApiError(response.status, "invalid_response", "Unexpected server response");
+  }
   if (!response.ok) {
     const err = data as { error?: string; message?: string } | undefined;
     throw new ApiError(

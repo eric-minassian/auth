@@ -68,7 +68,9 @@ test("generate recovery codes, then recover the account with one", async ({ page
   const nickname = uniqueNickname();
   await signUp(page, nickname);
 
-  // Generate recovery codes — the fresh login satisfies the step-up.
+  // Generate recovery codes — the fresh login satisfies the step-up. Generation
+  // lives under the Recovery tab (deep-linkable via the ?tab search param).
+  await page.goto("/account?tab=recovery");
   await page.getByRole("button", { name: /^Generate$/ }).click();
   const codesBlock = page.locator("pre");
   await expect(codesBlock).toBeVisible();
@@ -95,7 +97,8 @@ test("generate recovery codes, then recover the account with one", async ({ page
   const [firstCode = ""] = codes;
   await page.getByLabel("Recovery code").fill(firstCode);
   await page.getByRole("button", { name: /Recover/ }).click();
-  await expect(page).toHaveURL(/\/account$/, { timeout: 30_000 });
+  // Recovery hands off to /account?tab=recovery&generate=1 to mint fresh codes.
+  await expect(page).toHaveURL(/\/account/, { timeout: 30_000 });
 });
 
 test("OIDC authorize returns a code to the RP when signed in", async ({ page }) => {
