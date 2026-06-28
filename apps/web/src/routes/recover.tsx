@@ -8,8 +8,13 @@ import { useState } from "react";
 
 import { AuthCard } from "../components/AuthCard.js";
 import { useTitle } from "../hooks/useTitle.js";
-import { ApiError } from "../lib/api.js";
-import { loginWithPasskey, redeemRecoveryCode, registerPasskey } from "../lib/webauthn.js";
+import {
+  describePasskeyError,
+  loginWithPasskey,
+  redeemRecoveryCode,
+  registerPasskey,
+  WebAuthnError,
+} from "../lib/webauthn.js";
 import { centeredLayoutRoute } from "./_centered.js";
 
 function Recover() {
@@ -26,19 +31,13 @@ function Recover() {
       await redeemRecoveryCode(code.trim());
       // Recovery grants an enroll session: register a fresh passkey, then log in.
       const { discoverable } = await registerPasskey();
-      if (discoverable === false) {
-        throw new Error(
-          "This device couldn't store a sign-in-ready passkey. Try a platform authenticator and recover again.",
-        );
-      }
+      if (discoverable === false) throw new WebAuthnError("not_discoverable");
       await loginWithPasskey();
       // The user just completed a user-verifying assertion, so drop them
       // straight into generating replacement codes via a typed search param.
       void navigate({ to: "/account", search: { tab: "recovery", generate: true } });
     } catch (e) {
-      setError(
-        e instanceof ApiError ? e.message : "Recovery failed. Check the code and try again.",
-      );
+      setError(describePasskeyError(e, "Recovery failed. Check the code and try again."));
       setBusy(false);
     }
   }

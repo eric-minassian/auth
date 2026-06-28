@@ -8,9 +8,13 @@ import { useState } from "react";
 
 import { AuthCard } from "../components/AuthCard.js";
 import { useTitle } from "../hooks/useTitle.js";
-import { ApiError } from "../lib/api.js";
 import { resumeAfterLogin } from "../lib/return-to.js";
-import { loginWithPasskey, signUp } from "../lib/webauthn.js";
+import {
+  describePasskeyError,
+  loginWithPasskey,
+  signUp,
+  WebAuthnError,
+} from "../lib/webauthn.js";
 import { centeredLayoutRoute } from "./_centered.js";
 
 interface SignUpSearch {
@@ -30,19 +34,13 @@ function SignUp() {
     try {
       // Solve the proof-of-work, register the first passkey, and activate.
       const { discoverable } = await signUp(nickname.trim());
-      if (discoverable === false) {
-        throw new Error(
-          "This device couldn't store a sign-in-ready passkey. Try a platform authenticator (Touch ID, Windows Hello, or a passkey manager).",
-        );
-      }
+      if (discoverable === false) throw new WebAuthnError("not_discoverable");
       // Signup leaves an enroll session; a passkey login mints the full session.
       await loginWithPasskey();
       // Resume an in-progress OAuth flow (prompt=create) or land on the account.
       resumeAfterLogin(return_to);
     } catch (e) {
-      setError(
-        e instanceof ApiError ? e.message : "Couldn't finish signing up. Please try again.",
-      );
+      setError(describePasskeyError(e, "Couldn't finish signing up. Please try again."));
       setBusy(false);
     }
   }

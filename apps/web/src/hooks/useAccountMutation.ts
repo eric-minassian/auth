@@ -2,7 +2,7 @@ import { useRouter } from "@tanstack/react-router";
 import { useCallback, useState } from "react";
 import { toast } from "sonner";
 
-import { ApiError } from "../lib/api.js";
+import { describePasskeyError } from "../lib/webauthn.js";
 
 interface RunOptions {
   /** Toast shown on success. Omit to stay silent (e.g. recovery codes). */
@@ -15,9 +15,9 @@ interface RunOptions {
 
 /**
  * Uniform wrapper for account mutations: tracks a per-action pending key, shows
- * an error toast (preferring the server's ApiError message), an optional success
- * toast, and re-runs the route loaders via `router.invalidate()` so the UI
- * reflects the new state. Failed mutations never invalidate (no stale flash).
+ * an error toast (preferring the server's ApiError / WebAuthn error message), an
+ * optional success toast, and re-runs the route loaders via `router.invalidate()`
+ * so the UI reflects the new state. Failed mutations never invalidate (no stale flash).
  */
 export function useAccountMutation() {
   const router = useRouter();
@@ -32,7 +32,7 @@ export function useAccountMutation() {
         if (!opts.skipInvalidate) await router.invalidate();
         return result;
       } catch (e) {
-        toast.error(e instanceof ApiError ? e.message : (opts.error ?? "Something went wrong"));
+        toast.error(describePasskeyError(e, opts.error ?? "Something went wrong"));
         return undefined;
       } finally {
         setPendingKey(null);
