@@ -30,12 +30,15 @@ jobs:
     env:
       AWS_REGION: us-east-1
     steps:
-      - uses: actions/checkout@v6
+      # Actions pinned to commit SHAs (mutable tags are a supply-chain risk —
+      # CVE-2025-30066); the trailing comment is the version Dependabot tracks.
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
+          toolchain: stable
           targets: aarch64-unknown-linux-gnu
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Install cargo-lambda
         run: pip install cargo-lambda
 
@@ -43,7 +46,7 @@ jobs:
       # packageManager field and runs on the setup-node Node (pnpm 11.x needs Node
       # >=22.13). corepack uses pnpm's default store path; pnpm/action-setup nests
       # the store under node_modules, breaking the design dep's d.ts build (TS2883).
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version-file: .nvmrc
       - run: corepack enable
@@ -54,7 +57,7 @@ jobs:
       - name: Build SPA
         run: pnpm --filter web build
 
-      - uses: aws-actions/configure-aws-credentials@v6
+      - uses: aws-actions/configure-aws-credentials@254c19bd240aabef8777f48595e9d2d7b972184b # v6
         with:
           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}

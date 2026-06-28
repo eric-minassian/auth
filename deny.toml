@@ -1,0 +1,37 @@
+# cargo-deny — supply-chain gate for the Rust dependency tree, run in CI
+# (.github/workflows/ci.yml). The whole passkey/JWT/DPoP model assumes no
+# compromised dependency; this fails the build on a known advisory before it
+# can ship. Docs: https://embarkstudios.github.io/cargo-deny/
+#
+# Enforced checks: `advisories` (RustSec CVEs + yanked crates), `bans`
+# (wildcard reqs), `sources` (only known registries). Licenses are not gated
+# here yet — add a `[licenses]` allow-list and `licenses` to the CI command
+# when ready.
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+# A yanked crate in the lockfile is a hard failure.
+yanked = "deny"
+# Flag unmaintained advisories only for our own (workspace) dependencies — not
+# deep-transitive crates we can't action — to keep the signal high and avoid
+# pressure to silence transitive notices (see the no-dependabot-overrides note).
+unmaintained = "workspace"
+# Advisory IDs to ignore — add an entry ONLY with a written justification on the
+# line above it (e.g. an unreachable transitive advisory with no fixed release).
+ignore = []
+
+[bans]
+# Duplicate versions are common and low-signal in a large tree: surface, don't fail.
+multiple-versions = "warn"
+# A wildcard version requirement on a crates.io dependency is forbidden…
+wildcards = "deny"
+# …but our own path / workspace crates may use `*` freely.
+allow-wildcard-paths = true
+
+[sources]
+# Every crate must resolve to a known registry / git source.
+unknown-registry = "deny"
+unknown-git = "deny"
