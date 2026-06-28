@@ -37,6 +37,112 @@ export async function supportsConditionalUi(): Promise<boolean> {
   );
 }
 
+// ---- Error taxonomy --------------------------------------------------------
+
+export type WebAuthnErrorCode =
+  | "cancelled"
+  | "unsupported"
+  | "already_registered"
+  | "not_discoverable"
+  | "security"
+  | "unknown";
+
+/**
+ * A passkey-ceremony failure with a stable, anti-enumeration-safe `code`. These
+ * errors are device-local (cancel, no-credential, capability) and carry no
+ * account-existence signal, so their messages are safe to show verbatim.
+ */
+export class WebAuthnError extends Error {
+  readonly code: WebAuthnErrorCode;
+  constructor(code: WebAuthnErrorCode, message?: string) {
+    super(message ?? webAuthnErrorMessage(code));
+    this.name = "WebAuthnError";
+    this.code = code;
+  }
+}
+
+/** Map a raw WebAuthn `DOMException` to a typed {@link WebAuthnError}. */
+function classifyWebauthnError(error: unknown): WebAuthnError {
+  if (error instanceof WebAuthnError) return error;
+  const name = error instanceof DOMException ? error.name : "";
+  switch (name) {
+    // The platform deliberately conflates user-cancel, timeout, and
+    // no-matching-credential into NotAllowedError — we cannot, and (for
+    // anti-enumeration) must not, distinguish them.
+    case "NotAllowedError":
+    case "AbortError":
+      return new WebAuthnError("cancelled");
+    case "InvalidStateError":
+      return new WebAuthnError("already_registered");
+    case "NotSupportedError":
+    case "ConstraintError":
+      return new WebAuthnError("unsupported");
+    case "SecurityError":
+      return new WebAuthnError("security");
+    default:
+      return new WebAuthnError("unknown");
+  }
+}
+
+/** User-facing copy for a {@link WebAuthnErrorCode}. */
+export function webAuthnErrorMessage(code: WebAuthnErrorCode): string {
+  switch (code) {
+    case "cancelled":
+      return "The passkey prompt was dismissed or timed out. Please try again.";
+    case "unsupported":
+      return "This device or browser can't use passkeys here. Try Touch ID, Windows Hello, or a passkey manager.";
+    case "already_registered":
+      return "There's already a passkey for this account on this device.";
+    case "not_discoverable":
+      return "This device couldn't store a sign-in-ready passkey. Try a platform authenticator (Touch ID, Windows Hello, or a passkey manager).";
+    case "security":
+      return "Couldn't verify this site for passkeys. Make sure you're on the official site, then try again.";
+    case "unknown":
+      return "Something went wrong with your passkey. Please try again.";
+  }
+}
+
+/** Whether the error is the user dismissing/timing out the prompt (not a real failure). */
+export function isUserCancellation(error: unknown): boolean {
+  return error instanceof WebAuthnError && error.code === "cancelled";
+}
+
+/**
+ * Best user-facing message for any error thrown by a passkey flow: typed
+ * WebAuthn errors and server `ApiError`s carry their own copy; everything else
+ * falls back to a caller-supplied default.
+ */
+export function describePasskeyError(error: unknown, fallback: string): string {
+  if (error instanceof WebAuthnError || error instanceof ApiError) return error.message;
+  return fallback;
+}
+
+/** Run `navigator.credentials.create`, normalizing failures to {@link WebAuthnError}. */
+async function createPasskey(
+  options: PublicKeyCredentialCreationOptions,
+): Promise<PublicKeyCredential> {
+  let credential: Credential | null;
+  try {
+    credential = await navigator.credentials.create({ publicKey: options });
+  } catch (error) {
+    throw classifyWebauthnError(error);
+  }
+  if (!credential) throw new WebAuthnError("cancelled");
+  return credential as PublicKeyCredential;
+}
+
+/** Run `navigator.credentials.get`, normalizing failures to {@link WebAuthnError}. */
+async function getPasskey(request: CredentialRequestOptions): Promise<PublicKeyCredential> {
+  let credential: Credential | null;
+  try {
+    credential = await navigator.credentials.get(request);
+  } catch (error) {
+    throw classifyWebauthnError(error);
+  }
+  if (!credential) throw new WebAuthnError("cancelled");
+  return credential as PublicKeyCredential;
+}
+
 // ---- Proof of work ---------------------------------------------------------
 
 interface PowChallenge {
@@ -92,10 +198,7 @@ export async function signUp(nickname: string, passkeyName?: string): Promise<Re
   const options = PublicKeyCredential.parseCreationOptionsFromJSON(
     start.options.publicKey as PublicKeyCredentialCreationOptionsJSON,
   );
-  const credential = (await navigator.credentials.create({
-    publicKey: options,
-  })) as PublicKeyCredential | null;
-  if (!credential) throw new Error("passkey creation was cancelled");
+  const credential = await createPasskey(options);
   await api.post("/api/signup/finish", {
     ceremony_id: start.ceremony_id,
     credential: credential.toJSON(),
@@ -112,10 +215,7 @@ export async function registerPasskey(name?: string): Promise<RegistrationResult
   const options = PublicKeyCredential.parseCreationOptionsFromJSON(
     start.options.publicKey as PublicKeyCredentialCreationOptionsJSON,
   );
-  const credential = (await navigator.credentials.create({
-    publicKey: options,
-  })) as PublicKeyCredential | null;
-  if (!credential) throw new Error("passkey creation was cancelled");
+  const credential = await createPasskey(options);
   await api.post("/api/webauthn/register/finish", {
     ceremony_id: start.ceremony_id,
     credential: credential.toJSON(),
@@ -139,12 +239,11 @@ export async function loginWithPasskey(opts?: {
   const options = PublicKeyCredential.parseRequestOptionsFromJSON(
     start.options.publicKey as PublicKeyCredentialRequestOptionsJSON,
   );
-  const credential = (await navigator.credentials.get({
+  const credential = await getPasskey({
     publicKey: options,
     ...(opts?.conditional ? { mediation: "conditional" as const } : {}),
     ...(opts?.signal ? { signal: opts.signal } : {}),
-  })) as PublicKeyCredential | null;
-  if (!credential) throw new Error("passkey authentication was cancelled");
+  });
   await api.post("/api/webauthn/login/finish", {
     ceremony_id: start.ceremony_id,
     credential: credential.toJSON(),
@@ -159,10 +258,7 @@ export async function reauth(): Promise<void> {
   const options = PublicKeyCredential.parseRequestOptionsFromJSON(
     start.options.publicKey as PublicKeyCredentialRequestOptionsJSON,
   );
-  const credential = (await navigator.credentials.get({
-    publicKey: options,
-  })) as PublicKeyCredential | null;
-  if (!credential) throw new Error("re-authentication was cancelled");
+  const credential = await getPasskey({ publicKey: options });
   await api.post("/api/webauthn/reauth/finish", {
     ceremony_id: start.ceremony_id,
     credential: credential.toJSON(),
