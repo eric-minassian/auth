@@ -8,29 +8,34 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
+# Default to read-only; the release job escalates exactly what changesets needs.
 permissions:
-  contents: write
-  pull-requests: write
-  # Required for npm Trusted Publishing (OIDC) — no long-lived NPM_TOKEN.
-  id-token: write
+  contents: read
 
 jobs:
   release:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # changesets creates the version PR / tags / GitHub Release
+      pull-requests: write # …and opens the "Version Packages" PR
+      # Required for npm Trusted Publishing (OIDC) — no long-lived NPM_TOKEN.
+      id-token: write
     steps:
-      - uses: actions/checkout@v6
+      # Actions pinned to commit SHAs (mutable tags are a supply-chain risk —
+      # CVE-2025-30066); the trailing comment is the version Dependabot tracks.
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       # Enable pnpm via corepack: reads the pinned version from package.json's
       # packageManager field and runs on the setup-node Node (pnpm 11.x needs Node
       # >=22.13). corepack uses pnpm's default store path; pnpm/action-setup nests
       # the store under node_modules, breaking the design dep's d.ts build (TS2883).
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version-file: .nvmrc
       - run: corepack enable
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @ericminassian/auth build
       - name: Create Release PR or publish
-        uses: changesets/action@v1
+        uses: changesets/action@a45c4d594aa4e2c509dc14a9f2b3b67ba3780d0d # v1
         with:
           # changeset publish runs `pnpm publish` (changesets detects the package
           # manager), which authenticates to npm via OIDC trusted publishing on
