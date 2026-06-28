@@ -92,6 +92,20 @@ async fn discovery_and_jwks_are_served() {
             .is_some_and(|v| v.iter().any(|p| p == "create")),
         "prompt=create advertised"
     );
+    // RFC 9470 step-up: the phishing-resistant acr values are advertised.
+    assert!(
+        doc["acr_values_supported"]
+            .as_array()
+            .is_some_and(|v| v.iter().any(|a| a == "phr-stepup") && v.iter().any(|a| a == "phr")),
+        "acr_values_supported advertises phr and phr-stepup: {:?}",
+        doc["acr_values_supported"]
+    );
+    assert!(
+        doc["claims_supported"]
+            .as_array()
+            .is_some_and(|v| v.iter().any(|c| c == "acr")),
+        "acr is an advertised claim"
+    );
 
     let res = app.server.get("/.well-known/jwks.json").await;
     res.assert_status(StatusCode::OK);
@@ -164,6 +178,23 @@ async fn full_code_pkce_flow_issues_verifiable_tokens() {
         .claims;
     assert_eq!(id_claims["nonce"], "noncevalue");
     assert_eq!(id_claims["nickname"], "oidc@example.com");
+    // A passkey login is phishing-resistant: the baseline acr is `phr`.
+    assert_eq!(
+        id_claims["acr"], "phr",
+        "id_token carries the phishing-resistant acr"
+    );
+    // The access token carries acr/amr too, so an RP resource server can gate on
+    // assurance (RFC 9068 §2.2) without a userinfo round-trip.
+    let at_claims = jsonwebtoken::decode::<serde_json::Value>(access_token, &key, &validation)
+        .expect("access token verifies")
+        .claims;
+    assert_eq!(at_claims["acr"], "phr", "access token carries acr");
+    assert!(
+        at_claims["amr"]
+            .as_array()
+            .is_some_and(|a| a.iter().any(|m| m == "webauthn")),
+        "access token carries amr"
+    );
     assert!(
         id_claims.get("email").is_none(),
         "no email claim is ever issued"
@@ -339,6 +370,95 @@ async fn fresh_login_satisfies_prompt_login_and_max_age_zero() {
             "{key}={value} should issue a code to a freshly-logged-in user: {location}"
         );
     }
+}
+
+#[tokio::test]
+async fn acr_stepup_is_satisfied_by_a_fresh_login_and_drops_to_baseline_on_refresh() {
+    let mut app = TestApp::spawn().await;
+    app.seed_client(&rp_client()).await;
+    let mut authenticator = flows::new_authenticator();
+    flows::signup_with_passkey(&mut app, "acr@example.com", &mut authenticator).await;
+
+    // A just-completed login satisfies the stepped-up acr (fresh reauth_at +
+    // grace floor), so authorize issues a code rather than looping to sign-in.
+    let pkce = pkce();
+    let res = app
+        .server
+        .get("/oauth/authorize")
+        .add_query_param("response_type", "code")
+        .add_query_param("client_id", "rp")
+        .add_query_param("redirect_uri", RP_CALLBACK)
+        .add_query_param("scope", "openid offline_access")
+        .add_query_param("code_challenge", &pkce.challenge)
+        .add_query_param("code_challenge_method", "S256")
+        .add_query_param("acr_values", "phr-stepup")
+        .await;
+    res.assert_status(StatusCode::SEE_OTHER);
+    let location = res.header("location").to_str().expect("loc").to_string();
+    assert!(
+        location.starts_with(RP_CALLBACK) && location.contains("code="),
+        "stepped-up code issued to a fresh session: {location}"
+    );
+    let url = Url::parse(&location).expect("url");
+    let code = url
+        .query_pairs()
+        .find(|(k, _)| k == "code")
+        .map(|(_, v)| v.to_string())
+        .expect("code");
+
+    let res = app
+        .server
+        .post("/oauth/token")
+        .form(&[
+            ("grant_type", "authorization_code"),
+            ("code", &code),
+            ("redirect_uri", RP_CALLBACK),
+            ("client_id", "rp"),
+            ("code_verifier", &pkce.verifier),
+        ])
+        .await;
+    res.assert_status(StatusCode::OK);
+    let tokens: serde_json::Value = res.json();
+
+    let jwks: serde_json::Value = app.server.get("/.well-known/jwks.json").await.json();
+    let jwk: jsonwebtoken::jwk::Jwk = serde_json::from_value(jwks["keys"][0].clone()).expect("jwk");
+    let key = jsonwebtoken::DecodingKey::from_jwk(&jwk).expect("key");
+    let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::ES256);
+    validation.set_issuer(&[harness::ISSUER]);
+    validation.set_audience(&["rp"]);
+    let decode = |token: &str| {
+        jsonwebtoken::decode::<serde_json::Value>(token, &key, &validation)
+            .expect("token verifies")
+            .claims
+    };
+
+    let id_token = tokens["id_token"].as_str().expect("id token");
+    assert_eq!(
+        decode(id_token)["acr"],
+        "phr-stepup",
+        "a fresh login satisfies and stamps the stepped-up acr"
+    );
+
+    // A refresh deliberately drops back to the phishing-resistant baseline:
+    // step-up is point-in-time at the authorize event, not a sticky property.
+    let refresh_token = tokens["refresh_token"].as_str().expect("rt");
+    let res = app
+        .server
+        .post("/oauth/token")
+        .form(&[
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh_token),
+            ("client_id", "rp"),
+        ])
+        .await;
+    res.assert_status(StatusCode::OK);
+    let refreshed: serde_json::Value = res.json();
+    let refreshed_id = refreshed["id_token"].as_str().expect("id token");
+    assert_eq!(
+        decode(refreshed_id)["acr"],
+        "phr",
+        "a refresh carries the baseline acr, never the stepped-up one"
+    );
 }
 
 #[tokio::test]

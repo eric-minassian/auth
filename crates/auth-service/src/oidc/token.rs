@@ -9,6 +9,7 @@ use super::{OAuthError, dpop, pkce};
 use crate::api::AbuseContext;
 use crate::crypto::random_b64u;
 use crate::domain::oauth::{SCOPE_OFFLINE_ACCESS, SCOPE_OPENID, SCOPE_PROFILE, scope_contains};
+use crate::domain::session::ACR_PHISHING_RESISTANT;
 use crate::domain::user::User;
 use crate::jwt::claims::{
     ACCESS_TOKEN_TTL_SECS, AccessTokenClaims, Cnf, ID_TOKEN_TTL_SECS, IdTokenClaims,
@@ -228,6 +229,14 @@ async fn exchange_code(
             nonce: data.nonce.as_deref(),
             auth_time: data.auth_time,
             amr: &data.amr,
+            // The acr resolved at /authorize (`phr` / `phr-stepup`); fall back to
+            // the phishing-resistant baseline for a code minted before the field
+            // existed (transient, ≤60s TTL).
+            acr: if data.acr.is_empty() {
+                ACR_PHISHING_RESISTANT
+            } else {
+                &data.acr
+            },
             refresh_token,
             dpop_jkt,
         },
@@ -321,6 +330,10 @@ async fn refresh(
             // hardcoded value. Refresh families are only ever backed by full
             // sessions (login_finish), so today this is always ["webauthn"].
             amr: &session.amr,
+            // A refresh carries the phishing-resistant baseline. The stepped-up
+            // acr is point-in-time at the authorize event; it must not silently
+            // persist across refreshes — an RP that needs it re-challenges.
+            acr: ACR_PHISHING_RESISTANT,
             refresh_token: Some(new_token),
             // The new access token stays bound to the family's DPoP key.
             dpop_jkt: family.dpop_jkt.as_deref(),
@@ -337,6 +350,8 @@ struct MintInput<'a> {
     nonce: Option<&'a str>,
     auth_time: i64,
     amr: &'a [String],
+    /// Authentication Context Class Reference to stamp (`phr` / `phr-stepup`).
+    acr: &'a str,
     refresh_token: Option<String>,
     dpop_jkt: Option<&'a str>,
 }
@@ -354,6 +369,8 @@ async fn mint(state: &AppState, input: MintInput<'_>) -> Result<TokenResponse, O
         iat: ts,
         exp: ts + ACCESS_TOKEN_TTL_SECS,
         jti: Uuid::now_v7().to_string(),
+        acr: input.acr.to_string(),
+        amr: input.amr.to_vec(),
         cnf: input.dpop_jkt.map(|jkt| Cnf {
             jkt: jkt.to_string(),
         }),
@@ -371,6 +388,7 @@ async fn mint(state: &AppState, input: MintInput<'_>) -> Result<TokenResponse, O
             auth_time: input.auth_time,
             sid: input.sid_hash.to_string(),
             amr: input.amr.to_vec(),
+            acr: input.acr.to_string(),
             nonce: input.nonce.map(str::to_string),
             nickname: profile.then(|| input.user.nickname.clone()),
             updated_at: profile.then_some(input.user.updated_at),

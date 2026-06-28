@@ -96,6 +96,12 @@ pub struct AuthCodeData {
     pub code_challenge: String,
     pub auth_time: i64,
     pub amr: Vec<String>,
+    /// Authentication Context Class Reference granted at `/authorize`
+    /// (`phr` or `phr-stepup`). `#[serde(default)]` so a code minted before this
+    /// field existed (≤60s TTL) still deserializes; the token mint falls back to
+    /// the phishing-resistant baseline when empty.
+    #[serde(default)]
+    pub acr: String,
 }
 
 #[derive(Serialize, Deserialize)]
