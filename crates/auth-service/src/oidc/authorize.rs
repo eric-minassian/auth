@@ -5,7 +5,7 @@ use serde::Deserialize;
 use url::Url;
 
 use crate::domain::oauth::{OidcClient, SCOPE_OPENID, granted_scopes, scope_contains};
-use crate::domain::session::SessionLevel;
+use crate::domain::session::{AcrOutcome, SessionLevel};
 use crate::state::AppState;
 use crate::store::now;
 use crate::store::oauth::AuthCodeData;
@@ -28,6 +28,10 @@ pub struct AuthorizeQuery {
     /// ignored rather than failing query extraction before redirect_uri is
     /// validated.
     pub max_age: Option<String>,
+    /// OIDC `acr_values`: space-delimited Authentication Context Class
+    /// References the RP will accept, in preference order. Drives RFC 9470
+    /// step-up — `phr-stepup` forces a fresh user-verified assertion.
+    pub acr_values: Option<String>,
 }
 
 /// A just-completed login must satisfy `prompt=login` / `max_age` without
@@ -171,7 +175,25 @@ pub async fn authorize(
         }
     });
 
-    let Some(session) = session else {
+    // RFC 9470 step-up: resolve the RP's requested `acr_values` against the
+    // session. A request that can only be met by a fresh assertion drops the
+    // session here so it routes through the same "no usable session → sign-in"
+    // path as `prompt=login` (a full re-login re-stamps `reauth_at`).
+    let acr_values: Vec<&str> = query
+        .acr_values
+        .as_deref()
+        .unwrap_or_default()
+        .split_whitespace()
+        .collect();
+    let session =
+        session.and_then(
+            |s| match s.resolve_acr(&acr_values, now(), FRESH_LOGIN_GRACE_SECS) {
+                AcrOutcome::Granted(acr) => Some((s, acr)),
+                AcrOutcome::StepUp => None,
+            },
+        );
+
+    let Some((session, acr)) = session else {
         if want_none {
             // Can't actively re-authenticate without UI.
             return rp_error("login_required");
@@ -202,6 +224,7 @@ pub async fn authorize(
         code_challenge: code_challenge.to_string(),
         auth_time: session.created_at,
         amr: session.amr.clone(),
+        acr: acr.to_string(),
     };
     let code = match state.store.create_auth_code(&data).await {
         Ok(code) => code,

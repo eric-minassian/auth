@@ -23,6 +23,13 @@ pub struct AccessTokenClaims {
     pub iat: i64,
     pub exp: i64,
     pub jti: String,
+    /// Authentication Context Class Reference (RFC 9068 §2.2.1): `phr` for a
+    /// phishing-resistant passkey login, `phr-stepup` when stepped up. Lets an
+    /// RP's resource server gate on assurance without a userinfo round-trip.
+    pub acr: String,
+    /// Authentication methods (RFC 9068 §2.2.1), e.g. `["webauthn"]`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub amr: Vec<String>,
     /// DPoP sender-constraint (RFC 9449). Absent on plain bearer tokens.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cnf: Option<Cnf>,
@@ -38,6 +45,8 @@ pub struct IdTokenClaims {
     pub auth_time: i64,
     pub sid: String,
     pub amr: Vec<String>,
+    /// Authentication Context Class Reference (OIDC Core): `phr` / `phr-stepup`.
+    pub acr: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nonce: Option<String>,
     /// `profile` scope only — user-chosen, non-unique, mutable display label.

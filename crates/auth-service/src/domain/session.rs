@@ -22,6 +22,25 @@ pub const ENROLL_SESSION_SECS: i64 = 30 * 60;
 /// already-established full session).
 pub const REAUTH_FRESHNESS_SECS: i64 = 5 * 60;
 
+/// OIDC `acr` (Authentication Context Class Reference) values this provider
+/// emits. A `Full` session is *always* phishing-resistant — it can only be
+/// minted by a user-verified WebAuthn assertion (`login/finish`) — so
+/// [`ACR_PHISHING_RESISTANT`] is the baseline reported on every issued token.
+/// A session whose most recent assertion is within [`REAUTH_FRESHNESS_SECS`]
+/// additionally satisfies the stepped-up level, which a relying party can demand
+/// (via `acr_values`, RFC 9470) before authorizing a sensitive operation.
+pub const ACR_PHISHING_RESISTANT: &str = "phr";
+pub const ACR_PHISHING_RESISTANT_STEPUP: &str = "phr-stepup";
+
+/// Result of matching a session against an RP's requested `acr_values`.
+pub enum AcrOutcome {
+    /// The session satisfies the request; stamp this acr on the tokens.
+    Granted(&'static str),
+    /// The request can only be met by a fresh assertion — route to a step-up
+    /// (full re-login), exactly like `prompt=login`.
+    StepUp,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IdpSession {
     pub sid_hash: String,
@@ -53,5 +72,133 @@ pub struct IdpSession {
 impl IdpSession {
     pub fn is_expired(&self, now: i64) -> bool {
         now >= self.idle_expires_at || now >= self.absolute_expires_at
+    }
+
+    /// Whether the most recent user-verified assertion on this session is recent
+    /// enough to count as "stepped up". The `grace` floor absorbs the
+    /// sign-in → authorize redirect round-trip (a login that *just* completed
+    /// must satisfy a step-up ask without bouncing back to sign-in forever).
+    pub fn is_stepped_up(&self, now: i64, grace: i64) -> bool {
+        now - self.reauth_at <= REAUTH_FRESHNESS_SECS || now - self.created_at <= grace
+    }
+
+    /// Resolve the RP's requested `acr_values` (space-delimited, preference
+    /// order) against this session. With no request, reports the honest baseline
+    /// ([`ACR_PHISHING_RESISTANT`]). Returns [`AcrOutcome::StepUp`] *only* when a
+    /// fresh assertion would actually change the answer (the stepped-up level was
+    /// asked for and isn't currently satisfied) — never for an `acr` we
+    /// structurally cannot satisfy, which would loop the browser forever; those
+    /// fall back to best-effort baseline.
+    pub fn resolve_acr(&self, requested: &[&str], now: i64, grace: i64) -> AcrOutcome {
+        if requested.is_empty() {
+            return AcrOutcome::Granted(ACR_PHISHING_RESISTANT);
+        }
+        let stepped_up = self.is_stepped_up(now, grace);
+        for value in requested {
+            match *value {
+                ACR_PHISHING_RESISTANT => return AcrOutcome::Granted(ACR_PHISHING_RESISTANT),
+                ACR_PHISHING_RESISTANT_STEPUP if stepped_up => {
+                    return AcrOutcome::Granted(ACR_PHISHING_RESISTANT_STEPUP);
+                }
+                _ => {}
+            }
+        }
+        // Nothing satisfiable now. A fresh assertion only helps if the stepped-up
+        // level was requested; otherwise honor the baseline rather than loop.
+        if requested.contains(&ACR_PHISHING_RESISTANT_STEPUP) {
+            AcrOutcome::StepUp
+        } else {
+            AcrOutcome::Granted(ACR_PHISHING_RESISTANT)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const NOW: i64 = 1_000_000;
+    const GRACE: i64 = 60;
+
+    fn session(created_at: i64, reauth_at: i64) -> IdpSession {
+        IdpSession {
+            sid_hash: "h".to_string(),
+            user_id: Uuid::nil(),
+            level: SessionLevel::Full,
+            created_at,
+            last_seen_at: created_at,
+            idle_expires_at: created_at + SESSION_IDLE_SECS,
+            absolute_expires_at: created_at + SESSION_ABSOLUTE_SECS,
+            amr: vec!["webauthn".to_string()],
+            reauth_at,
+            device: None,
+            region: None,
+        }
+    }
+
+    fn granted(outcome: AcrOutcome) -> Option<&'static str> {
+        match outcome {
+            AcrOutcome::Granted(acr) => Some(acr),
+            AcrOutcome::StepUp => None,
+        }
+    }
+
+    #[test]
+    fn no_request_reports_phishing_resistant_baseline() {
+        let stale = session(NOW - 3600, NOW - 3600);
+        assert_eq!(granted(stale.resolve_acr(&[], NOW, GRACE)), Some("phr"));
+    }
+
+    #[test]
+    fn phr_is_satisfied_by_any_full_session() {
+        let stale = session(NOW - 3600, NOW - 3600);
+        assert_eq!(
+            granted(stale.resolve_acr(&["phr"], NOW, GRACE)),
+            Some("phr")
+        );
+    }
+
+    #[test]
+    fn stepup_is_satisfied_only_when_the_assertion_is_recent() {
+        let fresh = session(NOW - 3600, NOW - 60); // reauth 60s ago (< 5 min)
+        assert_eq!(
+            granted(fresh.resolve_acr(&["phr-stepup"], NOW, GRACE)),
+            Some("phr-stepup")
+        );
+
+        let stale = session(NOW - 3600, NOW - 3600); // reauth 1h ago
+        assert!(matches!(
+            stale.resolve_acr(&["phr-stepup"], NOW, GRACE),
+            AcrOutcome::StepUp
+        ));
+    }
+
+    #[test]
+    fn grace_floor_covers_a_just_completed_login() {
+        // reauth old, but the session was created within the redirect round-trip.
+        let just_logged_in = session(NOW - 30, NOW - 3600);
+        assert_eq!(
+            granted(just_logged_in.resolve_acr(&["phr-stepup"], NOW, GRACE)),
+            Some("phr-stepup")
+        );
+    }
+
+    #[test]
+    fn prefers_an_acceptable_lower_value_over_stepping_up() {
+        let stale = session(NOW - 3600, NOW - 3600);
+        // `phr` is acceptable right now, so no step-up despite phr-stepup first.
+        assert_eq!(
+            granted(stale.resolve_acr(&["phr-stepup", "phr"], NOW, GRACE)),
+            Some("phr")
+        );
+    }
+
+    #[test]
+    fn unknown_acr_falls_back_to_baseline_and_never_loops() {
+        let stale = session(NOW - 3600, NOW - 3600);
+        assert_eq!(
+            granted(stale.resolve_acr(&["urn:example:unknown"], NOW, GRACE)),
+            Some("phr")
+        );
     }
 }

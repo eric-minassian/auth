@@ -37,8 +37,13 @@ pub async fn openid_configuration(State(state): State<AppState>) -> impl IntoRes
             "scopes_supported": ["openid", "profile", "offline_access"],
             "claims_supported": [
                 "sub", "iss", "aud", "exp", "iat", "auth_time", "nonce",
-                "sid", "amr", "nickname", "updated_at"
+                "sid", "acr", "amr", "nickname", "updated_at"
             ],
+            // Authentication Context Class References we can assert. `phr` is a
+            // phishing-resistant, user-verified passkey login (every full
+            // session); `phr-stepup` additionally requires a fresh assertion —
+            // an RP requests it via `acr_values` to force step-up (RFC 9470).
+            "acr_values_supported": ["phr-stepup", "phr"],
             "backchannel_logout_supported": true,
             "backchannel_logout_session_supported": true,
             "frontchannel_logout_supported": false,
