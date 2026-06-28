@@ -21,6 +21,14 @@ export type AuthState =
 export interface SignInOptions {
   /** Where to return after the callback completes. Defaults to the current URL. */
   returnTo?: string;
+  /**
+   * OIDC `acr_values` to request — e.g. `"phr-stepup"` to satisfy an RFC 9470
+   * step-up challenge from a resource server. The IdP forces a fresh assertion
+   * when the current session can't meet it.
+   */
+  acrValues?: string;
+  /** OIDC `max_age` (seconds): require the backing authentication to be this recent. */
+  maxAge?: number;
 }
 
 export interface AuthClient {
@@ -46,6 +54,19 @@ export interface AuthClient {
   handleCallback(): Promise<{ returnTo: string | undefined } | null>;
   /** A valid access token, refreshing if necessary. Throws `login_required` if not signed in. */
   getAccessToken(options?: { forceRefresh?: boolean }): Promise<string>;
+  /**
+   * A DPoP proof (RFC 9449) for an RP-API call, bound to `method`/`url`/`accessToken`
+   * (`htm`/`htu`/`ath`). Resolves `undefined` where DPoP is unavailable — the caller
+   * then sends a plain bearer token. Usually you want {@link fetchWithAuth} instead.
+   */
+  getDpopProof(method: string, url: string, accessToken: string): Promise<string | undefined>;
+  /**
+   * `fetch` with the access token attached: `Authorization: DPoP <token>` plus a
+   * fresh proof when DPoP is available, otherwise `Authorization: Bearer <token>`.
+   * Refreshes the token as needed and transparently retries once on a
+   * resource-server DPoP-Nonce challenge (RFC 9449 §9).
+   */
+  fetchWithAuth(input: RequestInfo | URL, init?: RequestInit): Promise<Response>;
   getUser(): User | undefined;
   getState(): AuthState;
   onStateChange(listener: (state: AuthState) => void): () => void;
@@ -90,6 +111,13 @@ export function createAuthClient(options: AuthClientOptions): AuthClient {
 
   let discovery: Promise<Discovery> | undefined;
   let cachedToken: CachedToken | undefined;
+  // One shared refresh at a time. Refresh tokens are rotating and (under DPoP)
+  // sender-constrained, so two concurrent `getAccessToken()` calls that each
+  // POST the same refresh token look like token theft to the server, which
+  // revokes the whole family and logs the user out. Coalescing every caller
+  // onto a single in-flight rotation makes the common multi-component SPA case
+  // safe. See the single-flight test.
+  let refreshInFlight: Promise<void> | undefined;
   let user: User | undefined = decodeStoredUser(storage);
   let state: AuthState = user
     ? { status: "authenticated", user }
@@ -176,6 +204,30 @@ export function createAuthClient(options: AuthClientOptions): AuthClient {
     }
   }
 
+  // The body of a refresh, run at most once concurrently (guarded by
+  // `refreshInFlight`). Reads the refresh token inside the flight so it is
+  // consumed exactly once per rotation; on failure it clears local state so the
+  // app falls back to interactive sign-in.
+  async function refreshAccessToken(): Promise<void> {
+    const refreshToken = storage.get(RT_KEY);
+    if (!refreshToken) throw new AuthError("login_required", "no refresh token available");
+    try {
+      await exchange({
+        grant_type: "refresh_token",
+        refresh_token: refreshToken,
+        client_id: options.clientId,
+      });
+    } catch (error) {
+      // Refresh failed (rotated away, revoked, session ended): force re-login.
+      storage.remove(RT_KEY);
+      storage.remove(ID_KEY);
+      cachedToken = undefined;
+      setState({ status: "unauthenticated" });
+      if (error instanceof AuthError) throw new AuthError("login_required", error.message);
+      throw new AuthError("login_required");
+    }
+  }
+
   async function buildAuthorizeUrl(
     extra: Record<string, string>,
     returnTo?: string,
@@ -237,6 +289,67 @@ export function createAuthClient(options: AuthClientOptions): AuthClient {
     return { returnTo: tx.returnTo };
   }
 
+  async function obtainAccessToken(getOptions?: { forceRefresh?: boolean }): Promise<string> {
+    if (!getOptions?.forceRefresh && cachedToken && cachedToken.expiresAt > Date.now()) {
+      return cachedToken.accessToken;
+    }
+    // Join an in-flight refresh rather than starting a second one — including
+    // for `forceRefresh`, which must ride an existing rotation, never race it.
+    refreshInFlight ??= refreshAccessToken().finally(() => {
+      refreshInFlight = undefined;
+    });
+    await refreshInFlight;
+    if (!cachedToken) throw new AuthError("login_required");
+    return cachedToken.accessToken;
+  }
+
+  // `fetch` with a valid access token attached, sender-constrained with DPoP
+  // when available. One transparent retry on a resource-server DPoP-Nonce
+  // challenge (RFC 9449 §9): the RS replies 401 + `DPoP-Nonce`, we re-sign with
+  // it. `htu` is the request URL without query/fragment (the proof helper strips it).
+  async function fetchWithAuth(
+    input: RequestInfo | URL,
+    init?: RequestInit,
+  ): Promise<Response> {
+    const isRequest = typeof Request !== "undefined" && input instanceof Request;
+    const url =
+      typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : input.url;
+    const method = (init?.method ?? (isRequest ? input.method : "GET")).toUpperCase();
+    const token = await obtainAccessToken();
+
+    const send = async (nonce?: string): Promise<Response> => {
+      const headers = new Headers(init?.headers ?? (isRequest ? input.headers : undefined));
+      if (dpop) {
+        headers.set("authorization", `DPoP ${token}`);
+        headers.set(
+          "dpop",
+          await dpop.proof(method, url, { accessToken: token, ...(nonce ? { nonce } : {}) }),
+        );
+      } else {
+        headers.set("authorization", `Bearer ${token}`);
+      }
+      // Don't override a Request's method (a GET Request can't carry an init
+      // method/body) — its method already drove `method` above.
+      const requestInit: RequestInit = { ...init, headers };
+      if (!isRequest) requestInit.method = method;
+      return fetch(input, requestInit);
+    };
+
+    const response = await send();
+    if (dpop && response.status === 401) {
+      const nonce = response.headers.get("dpop-nonce");
+      const wantsNonce = (response.headers.get("www-authenticate") ?? "").includes(
+        "use_dpop_nonce",
+      );
+      if (nonce && wantsNonce) return send(nonce);
+    }
+    return response;
+  }
+
   // Drive a hidden iframe through `prompt=none` authorize. The callback page,
   // detecting it's framed, posts its query string back (see `handleCallback`).
   // Resolves the relayed search string, or `undefined` on timeout.
@@ -269,7 +382,10 @@ export function createAuthClient(options: AuthClientOptions): AuthClient {
 
   return {
     async signInWithRedirect(signInOptions): Promise<void> {
-      const url = await buildAuthorizeUrl({}, signInOptions?.returnTo ?? currentUrl());
+      const extra: Record<string, string> = {};
+      if (signInOptions?.acrValues) extra.acr_values = signInOptions.acrValues;
+      if (signInOptions?.maxAge !== undefined) extra.max_age = String(signInOptions.maxAge);
+      const url = await buildAuthorizeUrl(extra, signInOptions?.returnTo ?? currentUrl());
       redirect(url);
     },
 
@@ -317,29 +433,13 @@ export function createAuthClient(options: AuthClientOptions): AuthClient {
       return completeCallback();
     },
 
-    async getAccessToken(getOptions): Promise<string> {
-      if (!getOptions?.forceRefresh && cachedToken && cachedToken.expiresAt > Date.now()) {
-        return cachedToken.accessToken;
-      }
-      const refreshToken = storage.get(RT_KEY);
-      if (!refreshToken) throw new AuthError("login_required", "no refresh token available");
-      try {
-        await exchange({
-          grant_type: "refresh_token",
-          refresh_token: refreshToken,
-          client_id: options.clientId,
-        });
-      } catch (error) {
-        // Refresh failed (rotated away, revoked, session ended): force re-login.
-        storage.remove(RT_KEY);
-        storage.remove(ID_KEY);
-        setState({ status: "unauthenticated" });
-        if (error instanceof AuthError) throw new AuthError("login_required", error.message);
-        throw new AuthError("login_required");
-      }
-      if (!cachedToken) throw new AuthError("login_required");
-      return cachedToken.accessToken;
+    getAccessToken: (getOptions) => obtainAccessToken(getOptions),
+
+    async getDpopProof(method, url, accessToken): Promise<string | undefined> {
+      return dpop ? dpop.proof(method.toUpperCase(), url, { accessToken }) : undefined;
     },
+
+    fetchWithAuth,
 
     getUser: () => user,
     getState: () => state,

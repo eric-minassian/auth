@@ -37,6 +37,37 @@ The granted scope is `requested ∩ registered ∩ supported`. A client only rec
 (and only ever sees echoed) the scopes it is registered for — notably, a client not
 registered for `offline_access` gets **no refresh token**, even if it asks.
 
+## Assurance: `acr` / `amr` and step-up (RFC 9470)
+
+Every login is a user-verified, phishing-resistant passkey assertion, so tokens
+carry `amr: ["webauthn"]` and `acr: "phr"` (in the id_token **and** the JWT
+access token, so a resource server can gate on assurance without a `userinfo`
+round-trip). `acr_values_supported` is `["phr-stepup", "phr"]`.
+
+To force a **fresh** assertion before a sensitive action (RFC 9470):
+
+1. Your API returns `401` with
+   `WWW-Authenticate: DPoP error="insufficient_user_authentication", acr_values="phr-stepup"`.
+   The SDK's `stepUpChallenge({ acrValues: "phr-stepup" })` builds this header.
+2. The client re-authenticates with `acr_values=phr-stepup` (SDK:
+   `signInWithRedirect({ acrValues: "phr-stepup" })`); the IdP performs a fresh
+   passkey assertion and returns a token with `acr: "phr-stepup"`.
+
+`acr: "phr-stepup"` is point-in-time — it is **not** carried across refreshes
+(a refreshed token drops back to `acr: "phr"`). Re-challenge when you need it again.
+
+## Sender-constrained tokens (DPoP, RFC 9449)
+
+Tokens can be sender-constrained to a non-extractable client key: a bound access
+token carries a `cnf.jkt` and is useless without a fresh proof signed by that key.
+The SDK enables this automatically in the browser. On the resource-server side,
+`createAuthVerifier` verifies the proof by default whenever a token is bound
+(`dpop: { mode: "auto" }`) — so a bound token can't be downgraded to a plain
+bearer — with `"required"` and `"disabled"` modes available. The express/hono
+adapters wire this up; a hand-built `Request` must carry the real method/URL and
+the `DPoP` header. `require_dpop` can be set per client to reject unbound tokens
+at the token endpoint outright.
+
 ## Everything else is standard OAuth 2.1 / OIDC
 
 PKCE S256 is mandatory for every client; exact `redirect_uri` string match; auth-code
