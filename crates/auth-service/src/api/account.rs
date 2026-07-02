@@ -19,6 +19,9 @@ pub struct PasskeyInfo {
     pub name: String,
     pub created_at: i64,
     pub last_used_at: Option<i64>,
+    /// Whether this passkey's assertion backs the caller's current session
+    /// (the post-recovery review screen must not offer to delete it).
+    pub current: bool,
     /// WebAuthn Backup-Eligible hint: `true` for a syncable ("synced") passkey,
     /// `false` for a device-bound one. Informational only — `null` if unknown.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -74,6 +77,7 @@ pub async fn list_passkeys(
                 "name": c.name,
                 "created_at": c.created_at,
                 "last_used_at": c.last_used_at,
+                "current": session.credential_id.as_deref() == Some(c.credential_id.as_str()),
                 "backup_eligible": c.backup_eligible(),
                 "backup_state": c.backup_state(),
             })

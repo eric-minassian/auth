@@ -977,7 +977,8 @@
         "required": [
           "credential_id",
           "name",
-          "created_at"
+          "created_at",
+          "current"
         ],
         "properties": {
           "backup_eligible": {
@@ -1000,6 +1001,10 @@
           },
           "credential_id": {
             "type": "string"
+          },
+          "current": {
+            "type": "boolean",
+            "description": "Whether this passkey's assertion backs the caller's current session\n(the post-recovery review screen must not offer to delete it)."
           },
           "last_used_at": {
             "type": [
