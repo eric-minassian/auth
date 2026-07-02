@@ -96,8 +96,16 @@ test("generate recovery codes, then recover the account with one", async ({ page
   await page.goto("/recover");
   const [firstCode = ""] = codes;
   await page.getByLabel("Recovery code").fill(firstCode);
-  await page.getByRole("button", { name: /Recover/ }).click();
-  // Recovery hands off to /account?tab=recovery&generate=1 to mint fresh codes.
+  // Step 1: redeem the code (burns it, signs out everywhere, enroll session).
+  await page.getByRole("button", { name: /Redeem recovery code/ }).click();
+  // Step 2: register the replacement passkey and sign in (retry-safe).
+  await page.getByRole("button", { name: /Create a passkey/ }).click();
+  // The original passkey survived recovery, so the review screen gates
+  // everything: keep the old passkey explicitly, then continue.
+  await expect(page).toHaveURL(/\/review-passkeys/, { timeout: 30_000 });
+  await page.getByRole("button", { name: /^Keep$/ }).click();
+  await page.getByRole("button", { name: /Done — continue/ }).click();
+  // Recovery hands off to /account?tab=recovery&generate=true for fresh codes.
   await expect(page).toHaveURL(/\/account/, { timeout: 30_000 });
 });
 
