@@ -1,5 +1,6 @@
 import { Button } from "@eric-minassian/design/components/button";
 import { Checkbox } from "@eric-minassian/design/components/checkbox";
+import { useBlocker } from "@tanstack/react-router";
 import { DownloadIcon, PrinterIcon } from "lucide-react";
 import { useId, useState } from "react";
 import { toast } from "sonner";
@@ -43,6 +44,18 @@ function printCodes(codes: string[]): void {
 export function ShowOnceCodes(props: { codes: string[]; onDone: () => void }) {
   const [saved, setSaved] = useState(false);
   const ackId = useId();
+
+  // The previous code set is already invalidated server-side, so navigating
+  // away (tab switch, back, close) before these are saved destroys the
+  // account's only break-glass factor. Block until the user acknowledges.
+  useBlocker({
+    shouldBlockFn: () =>
+      !window.confirm(
+        "Leave without saving your recovery codes? They can never be shown again.",
+      ),
+    disabled: saved,
+    enableBeforeUnload: () => !saved,
+  });
 
   return (
     <div className="flex flex-col gap-3">

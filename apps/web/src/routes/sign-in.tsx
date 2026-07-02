@@ -85,7 +85,8 @@ function SignIn() {
       footer={
         <>
           No account?{" "}
-          <Link to="/sign-up" className="text-primary underline">
+          {/* Carry return_to so a mid-OAuth user still lands back at the RP. */}
+          <Link to="/sign-up" search={{ return_to }} className="text-primary underline">
             Create one
           </Link>
         </>
@@ -114,7 +115,11 @@ function SignIn() {
         {busy ? <Spinner /> : null}
         Sign in with a passkey
       </Button>
-      <Link to="/recover" className="text-muted-foreground text-center text-xs underline">
+      <Link
+        to="/recover"
+        search={{ return_to }}
+        className="text-muted-foreground text-center text-xs underline"
+      >
         Lost access to your passkey?
       </Link>
     </AuthCard>
