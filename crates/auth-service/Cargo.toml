@@ -39,7 +39,7 @@ webauthn-rs = { version = "0.5", features = [
 webauthn-rs-core = "0.5"
 jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
 p256 = { version = "0.13", features = ["ecdsa", "pem", "jwk"] }
-sha2 = "0.10"
+sha2 = "0.11"
 rand = "0.9"
 subtle = "2"
 
