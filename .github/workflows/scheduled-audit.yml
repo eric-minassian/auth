@@ -1,0 +1,50 @@
+name: Scheduled audit
+
+# Advisory databases move even when the repo doesn't: on a low-commit personal
+# project, a new RustSec/npm advisory against the committed lockfiles would
+# otherwise stay invisible until the next PR. This sweep re-checks weekly and
+# also audits the workflows themselves (zizmor). A failed run is the alert.
+on:
+  schedule:
+    - cron: "0 9 * * 1" # Mondays 09:00 UTC
+  workflow_dispatch:
+
+# Least privilege: read-only sweep, no escalations (matches ci.yml).
+permissions:
+  contents: read
+
+jobs:
+  cargo-advisories:
+    runs-on: ubuntu-latest
+    steps:
+      # Actions pinned to commit SHAs (mutable tags are a supply-chain risk —
+      # CVE-2025-30066); the trailing comment is the version Dependabot tracks.
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: EmbarkStudios/cargo-deny-action@bb137d7af7e4fb67e5f82a49c4fce4fad40782fe # v2
+        with:
+          command: check advisories bans sources
+
+  npm-advisories:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      # See ci.yml for why pnpm is enabled via corepack rather than action-setup.
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version-file: .nvmrc
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - name: Audit npm lockfile (fail on high+)
+        run: pnpm audit --audit-level high
+
+  workflow-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      # zizmor statically audits the GitHub Actions workflows themselves
+      # (template injections, unpinned actions, credential leaks). Installed
+      # from PyPI rather than adding another third-party action to pin.
+      - name: Run zizmor
+        run: |
+          pipx install zizmor
+          zizmor --min-severity medium .github/workflows/

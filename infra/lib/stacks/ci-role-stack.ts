@@ -64,6 +64,16 @@ export class AuthCiRoleStack extends cdk.Stack {
         resources: [`arn:aws:ssm:${region}:${account}:parameter/cdk-bootstrap/hnb659fds/version`],
       }),
     );
+    // The alert email lives in SSM (never in this public repo); the deploy
+    // workflow reads it and passes `-c alertEmail=...` so the SNS subscription
+    // is wired by the pipeline. See docs/deploy.md.
+    deployRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: "ReadAlertEmail",
+        actions: ["ssm:GetParameter"],
+        resources: [`arn:aws:ssm:${region}:${account}:parameter/auth/alert-email`],
+      }),
+    );
 
     // The seed step (scripts/seed.ts) runs directly under this role after the
     // deploy: it reads the table name from the auth-stateful stack and writes

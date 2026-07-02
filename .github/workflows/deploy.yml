@@ -68,9 +68,35 @@ jobs:
           # CDK reads these to locate the built artifacts (see config/environments.ts).
           LAMBDA_DIST: ../target/lambda/auth-service
           SPA_DIST: ../apps/web/dist
-        run: pnpm exec cdk deploy --context env=prod AuthStateful AuthApp --require-approval never
+        # The alert email is read from SSM at deploy time (never committed —
+        # public repo) and handed to CDK as context; absent parameter = no
+        # subscription change. One-time setup: docs/deploy.md.
+        run: |
+          EXTRA_CONTEXT=()
+          ALERT_EMAIL=$(aws ssm get-parameter --name /auth/alert-email \
+            --query Parameter.Value --output text 2>/dev/null || true)
+          if [ -n "$ALERT_EMAIL" ] && [ "$ALERT_EMAIL" != "None" ]; then
+            EXTRA_CONTEXT+=(--context "alertEmail=$ALERT_EMAIL")
+          fi
+          pnpm exec cdk deploy --context env=prod "${EXTRA_CONTEXT[@]}" \
+            AuthStateful AuthApp --require-approval never
 
       - name: Seed OIDC clients
         working-directory: infra
         # configure-aws-credentials exports AWS_REGION for seed.ts.
         run: pnpm exec tsx scripts/seed.ts
+
+      - name: Post-deploy smoke test
+        # From-the-internet verification through CloudFront: discovery serves
+        # the right issuer, JWKS has keys, the SPA shell loads. Fails the
+        # deploy run loudly instead of leaving a broken prod quietly.
+        run: |
+          set -euo pipefail
+          ISSUER="https://auth.ericminassian.com"
+          disc=$(curl -fsS --max-time 15 "$ISSUER/.well-known/openid-configuration")
+          echo "$disc" | jq -e --arg iss "$ISSUER" '.issuer == $iss' > /dev/null \
+            || { echo "::error::discovery issuer mismatch"; exit 1; }
+          curl -fsS --max-time 15 "$ISSUER/.well-known/jwks.json" \
+            | jq -e '.keys | length >= 1' > /dev/null \
+            || { echo "::error::JWKS has no keys"; exit 1; }
+          curl -fsS --max-time 15 -o /dev/null "$ISSUER/"

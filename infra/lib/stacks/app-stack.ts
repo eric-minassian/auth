@@ -21,6 +21,7 @@ import * as sns from "aws-cdk-lib/aws-sns";
 import * as snsSubscriptions from "aws-cdk-lib/aws-sns-subscriptions";
 import * as s3 from "aws-cdk-lib/aws-s3";
 import * as s3deploy from "aws-cdk-lib/aws-s3-deployment";
+import * as synthetics from "aws-cdk-lib/aws-synthetics";
 import * as wafv2 from "aws-cdk-lib/aws-wafv2";
 import * as cr from "aws-cdk-lib/custom-resources";
 import type { Construct } from "constructs";
@@ -347,12 +348,55 @@ export class AuthAppStack extends cdk.Stack {
       ],
     });
 
+    // --- Edge forensics ---
+    // WAF logs are the data that decides when the COUNT-mode managed rule sets
+    // above can flip to BLOCK (false-positive tuning needs real samples). WAF
+    // requires the destination log group name to start with `aws-waf-logs-`,
+    // so an explicit name is unavoidable here (it carries the env to keep
+    // parallel environments collision-free).
+    const wafLogs = new logs.LogGroup(this, "WafLogs", {
+      logGroupName: `aws-waf-logs-auth-${config.name}`,
+      retention: logs.RetentionDays.SIX_MONTHS,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+    // Vended-log delivery needs an explicit resource policy when configured
+    // outside the console (the console creates this implicitly).
+    new logs.ResourcePolicy(this, "WafLogsPolicy", {
+      policyStatements: [
+        new iam.PolicyStatement({
+          principals: [new iam.ServicePrincipal("delivery.logs.amazonaws.com")],
+          actions: ["logs:CreateLogStream", "logs:PutLogEvents"],
+          resources: [`${wafLogs.logGroupArn}`],
+        }),
+      ],
+    });
+    new wafv2.CfnLoggingConfiguration(this, "WafLogging", {
+      resourceArn: webAcl.attrArn,
+      // WAF rejects the `:*` stream suffix CDK appends to log-group ARNs.
+      logDestinationConfigs: [cdk.Fn.select(0, cdk.Fn.split(":*", wafLogs.logGroupArn))],
+    });
+
+    // CloudFront standard access logs: the request-level record behind any
+    // incident reconstruction (WAF logs only cover rule matches). Legacy log
+    // delivery writes via ACL, hence BUCKET_OWNER_PREFERRED.
+    const edgeLogs = new s3.Bucket(this, "EdgeLogs", {
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      encryption: s3.BucketEncryption.S3_MANAGED,
+      enforceSSL: true,
+      objectOwnership: s3.ObjectOwnership.BUCKET_OWNER_PREFERRED,
+      lifecycleRules: [{ expiration: cdk.Duration.days(90) }],
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+
     const distribution = new cloudfront.Distribution(this, "Distribution", {
       domainNames: [host],
       certificate,
       webAclId: webAcl.attrArn,
       minimumProtocolVersion: cloudfront.SecurityPolicyProtocol.TLS_V1_2_2021,
       httpVersion: cloudfront.HttpVersion.HTTP2_AND_3,
+      enableLogging: true,
+      logBucket: edgeLogs,
+      logIncludesCookies: false,
       defaultRootObject: "index.html",
       defaultBehavior: {
         origin: origins.S3BucketOrigin.withOriginAccessControl(spaBucket),
@@ -465,8 +509,126 @@ export class AuthAppStack extends cdk.Stack {
     // Failed logins are normal in ones; a burst signals credential stuffing.
     auditAlarm("LoginFailures", "login_failed", 50);
 
+    // --- Availability alerting: the security alarms above catch compromise;
+    // these catch the service being down or degraded. ---
+    const opsAlarm = (
+      id: string,
+      metric: cloudwatch.Metric,
+      threshold: number,
+      description: string,
+    ): void => {
+      new cloudwatch.Alarm(this, `${id}Alarm`, {
+        metric,
+        threshold,
+        evaluationPeriods: 1,
+        comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+        alarmDescription: description,
+      }).addAlarmAction(new cloudwatchActions.SnsAction(alarmTopic));
+    };
+    const fiveMinSum = { statistic: "Sum", period: cdk.Duration.minutes(5) };
+    opsAlarm(
+      "LambdaErrors",
+      fn.metricErrors(fiveMinSum),
+      1,
+      "auth Lambda reported a function error (panic/init failure)",
+    );
+    opsAlarm(
+      "LambdaThrottles",
+      fn.metricThrottles(fiveMinSum),
+      1,
+      "auth Lambda is being throttled (concurrency exhausted)",
+    );
+    // A single 5xx can be a cold-start timeout blip; three in five minutes is
+    // an outage signal.
+    opsAlarm(
+      "Api5xx",
+      httpApi.metricServerError(fiveMinSum),
+      3,
+      "auth API returned >= 3 5xx responses in 5 minutes",
+    );
+
+    // --- Synthetic canary (prod): from-the-internet proof the OIDC surface is
+    // up — discovery + JWKS through CloudFront (the RP-critical reads), the
+    // SPA shell, and one negative-path POST that exercises Lambda + DynamoDB
+    // past the edge cache. Every 15 minutes ≈ $3.5/mo; local skips it. ---
+    if (config.name === "prod") {
+      const canary = new synthetics.Canary(this, "AvailabilityCanary", {
+        schedule: synthetics.Schedule.rate(cdk.Duration.minutes(15)),
+        // Node HTTP checks only — no browser is driven, so the puppeteer
+        // runtime is just the newest maintained Synthetics Node runtime.
+        runtime: synthetics.Runtime.SYNTHETICS_NODEJS_PUPPETEER_9_1,
+        test: synthetics.Test.custom({
+          code: synthetics.Code.fromInline(canaryScript(issuerUrl(config))),
+          handler: "index.handler",
+        }),
+      });
+      new cloudwatch.Alarm(this, "CanaryAlarm", {
+        metric: canary.metricSuccessPercent({ period: cdk.Duration.minutes(15) }),
+        threshold: 100,
+        evaluationPeriods: 2,
+        comparisonOperator: cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
+        // No data = the canary itself stopped running = we are blind. Alarm.
+        treatMissingData: cloudwatch.TreatMissingData.BREACHING,
+        alarmDescription: "auth availability canary failing (or not running)",
+      }).addAlarmAction(new cloudwatchActions.SnsAction(alarmTopic));
+    }
+
     new cdk.CfnOutput(this, "Issuer", { value: issuerUrl(config) });
     new cdk.CfnOutput(this, "DistributionDomain", { value: distribution.distributionDomainName });
     new cdk.CfnOutput(this, "SecurityAlarmsTopicArn", { value: alarmTopic.topicArn });
   }
+}
+
+/**
+ * Inline canary handler: plain Node HTTPS checks against the public issuer.
+ * Throws on any deviation — a throw fails the canary run, which trips the
+ * success-percent alarm.
+ */
+function canaryScript(issuer: string): string {
+  return `
+const https = require('https');
+
+const ISSUER = ${JSON.stringify(issuer)};
+
+function fetchUrl(url, options = {}) {
+  return new Promise((resolve, reject) => {
+    const req = https.request(url, options, (res) => {
+      let body = '';
+      res.on('data', (c) => (body += c));
+      res.on('end', () => resolve({ status: res.statusCode, body }));
+    });
+    req.on('error', reject);
+    req.setTimeout(10000, () => req.destroy(new Error('timeout: ' + url)));
+    if (options.body) req.write(options.body);
+    req.end();
+  });
+}
+
+exports.handler = async () => {
+  const disc = await fetchUrl(ISSUER + '/.well-known/openid-configuration');
+  if (disc.status !== 200) throw new Error('discovery status ' + disc.status);
+  const meta = JSON.parse(disc.body);
+  if (meta.issuer !== ISSUER) throw new Error('issuer mismatch: ' + meta.issuer);
+
+  const jwks = await fetchUrl(ISSUER + '/.well-known/jwks.json');
+  if (jwks.status !== 200) throw new Error('jwks status ' + jwks.status);
+  if (!(JSON.parse(jwks.body).keys || []).length) throw new Error('jwks has no keys');
+
+  const spa = await fetchUrl(ISSUER + '/');
+  if (spa.status !== 200) throw new Error('spa status ' + spa.status);
+
+  // Negative path: a garbage refresh grant must come back as a clean OAuth
+  // 400 — proves the Lambda -> DynamoDB path works beyond the edge cache.
+  const token = await fetchUrl(ISSUER + '/oauth/token', {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: 'grant_type=refresh_token&refresh_token=rt_canary.bogus&client_id=canary',
+  });
+  if (token.status !== 400) throw new Error('token negative path status ' + token.status);
+  if (JSON.parse(token.body).error !== 'invalid_grant') {
+    throw new Error('token negative path returned unexpected error shape');
+  }
+};
+`;
 }
