@@ -44,9 +44,12 @@ rand = "0.9"
 subtle = "2"
 
 # AWS
+# default-features = false drops the SDKs' legacy `rustls` (0.21) TLS stack —
+# RUSTSEC-2026-0098/0099/0104 live in its rustls-webpki 0.101 — keeping only
+# the modern `default-https-client` (hyper-1 + rustls 0.23 + aws-lc).
 aws-config = { version = "1", features = ["behavior-version-latest"] }
-aws-sdk-dynamodb = "1"
-aws-sdk-kms = "1"
+aws-sdk-dynamodb = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio"] }
+aws-sdk-kms = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio"] }
 serde_dynamo = { version = "4", features = ["aws-sdk-dynamodb+1"] }
 
 # Domain plumbing
