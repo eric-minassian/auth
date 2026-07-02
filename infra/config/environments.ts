@@ -35,6 +35,7 @@ const ENVIRONMENTS: Record<EnvName, AuthConfig> = {
     delegation: DELEGATION,
     lambdaAssetPath,
     spaAssetPath,
+    activeSigningKey: "a",
   },
   prod: {
     name: "prod",
@@ -44,6 +45,7 @@ const ENVIRONMENTS: Record<EnvName, AuthConfig> = {
     delegation: DELEGATION,
     lambdaAssetPath,
     spaAssetPath,
+    activeSigningKey: "a",
   },
 };
 

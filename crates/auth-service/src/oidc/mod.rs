@@ -144,7 +144,20 @@ pub fn verify_own_jws(
     if !typ.eq_ignore_ascii_case(expected_typ) {
         return None;
     }
-    let jwk: jsonwebtoken::jwk::Jwk = serde_json::from_value(signer.public_jwk()).ok()?;
+    // Select the published key matching the token's kid — during a keyring
+    // rotation, tokens signed by the previous key must still verify while it
+    // remains published. No kid (or no match) falls back to the active key.
+    let header_kid = header.kid;
+    let jwks = signer.public_jwks();
+    let jwk_value = header_kid
+        .as_deref()
+        .and_then(|kid| {
+            jwks.iter()
+                .find(|j| j.get("kid").and_then(serde_json::Value::as_str) == Some(kid))
+        })
+        .or_else(|| jwks.first())?
+        .clone();
+    let jwk: jsonwebtoken::jwk::Jwk = serde_json::from_value(jwk_value).ok()?;
     let key = jsonwebtoken::DecodingKey::from_jwk(&jwk).ok()?;
     let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::ES256);
     validation.set_issuer(&[issuer]);
