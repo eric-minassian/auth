@@ -72,7 +72,18 @@ pub fn build_router(state: AppState) -> Router {
             "/api/account/recovery-readiness",
             get(api::account::recovery_readiness),
         )
-        .route("/api/account", delete(api::account::delete_account));
+        .route(
+            "/api/account",
+            delete(api::account::delete_account).patch(api::account::update_account),
+        )
+        .route(
+            "/api/account/sessions/revoke-others",
+            post(api::account::revoke_other_sessions),
+        )
+        .route(
+            "/api/account/credential-review/complete",
+            post(api::account::complete_credential_review),
+        );
 
     // OIDC endpoints. token/revoke/userinfo are browser-callable from RP
     // origins (CORS allowlist from client registrations); they never read

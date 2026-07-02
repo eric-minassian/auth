@@ -90,6 +90,17 @@ pub async fn redeem(
         revoke_session_cascade(&state, &session).await?;
     }
 
+    // Recovery is the scenario where an existing passkey may be in a thief's
+    // hands (lost/stolen device). If any survive, the owner must review each
+    // one before this account can authorize RPs again.
+    if !state.store.list_credentials(user.user_id).await?.is_empty() {
+        state
+            .store
+            .set_pending_credential_review(user.user_id, true)
+            .await?;
+        tracing::info!(target: "audit", event = "credential_review_required", user_id = %user.user_id);
+    }
+
     let (sid, _session) = state
         .store
         .create_session(

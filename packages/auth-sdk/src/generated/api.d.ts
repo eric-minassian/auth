@@ -27,6 +27,35 @@ export interface paths {
         delete: operations["delete_account"];
         options?: never;
         head?: never;
+        /**
+         * PATCH /api/account — update the display nickname. `updated_at` is bumped,
+         *     which the `profile` scope surfaces to RPs (id_token/userinfo) so they can
+         *     refresh cached copies; the SPA also signals the platform passkey manager
+         *     (`signalCurrentUserDetails`) so passkey entries show the new name.
+         */
+        patch: operations["update_account"];
+        trace?: never;
+    };
+    "/api/account/credential-review/complete": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * POST /api/account/credential-review/complete — the owner has reviewed
+         *     (kept or deleted) every passkey that survived a recovery; clear the flag
+         *     that blocks `/oauth/authorize`. Deletions themselves go through the
+         *     normal passkey-deletion endpoint (with its step-up gate and session
+         *     cascade) before this is called.
+         */
+        post: operations["complete_credential_review"];
+        delete?: never;
+        options?: never;
+        head?: never;
         patch?: never;
         trace?: never;
     };
@@ -128,6 +157,29 @@ export interface paths {
         get: operations["list_sessions"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/account/sessions/revoke-others": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * POST /api/account/sessions/revoke-others — sign out everywhere else: one
+         *     call revokes every session except the caller's (each cascading to refresh
+         *     families + back-channel logout). One rate token and one audit event for
+         *     the whole sweep — the previous SPA-side per-session loop burned a rate
+         *     token per session and could rate-limit itself halfway through.
+         */
+        post: operations["revoke_other_sessions"];
         delete?: never;
         options?: never;
         head?: never;
@@ -533,6 +585,14 @@ export interface components {
         RenameRequest: {
             name: string;
         };
+        RevokeOthersResponse: {
+            ok: boolean;
+            /**
+             * Format: int32
+             * @description Number of sessions revoked (excludes the caller's own).
+             */
+            revoked: number;
+        };
         SessionInfo: {
             session: components["schemas"]["SessionMeta"];
             user: components["schemas"]["SessionUser"];
@@ -560,6 +620,11 @@ export interface components {
         };
         SessionUser: {
             nickname: string;
+            /**
+             * @description Present (true) when a recovery redemption left older passkeys that the
+             *     owner has not yet reviewed — the SPA routes to the review screen.
+             */
+            pending_credential_review?: boolean | null;
             user_id: string;
         };
         StartRequest: {
@@ -586,6 +651,10 @@ export interface components {
             refresh_token?: string | null;
             scope: string;
             token_type: string;
+        };
+        UpdateAccountRequest: {
+            /** @description New display nickname (non-unique, mutable, never an identifier). */
+            nickname: string;
         };
     };
     responses: never;
@@ -623,6 +692,72 @@ export interface operations {
             };
             /** @description Step-up re-authentication required */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    update_account: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateAccountRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OkResponse"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    complete_credential_review: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OkResponse"];
+                };
+            };
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -803,6 +938,33 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SessionList"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    revoke_other_sessions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RevokeOthersResponse"];
                 };
             };
             403: {

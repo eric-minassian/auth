@@ -40,6 +40,7 @@ impl Store {
             status: AccountStatus::Pending,
             created_at: ts,
             updated_at: ts,
+            pending_credential_review: false,
         };
         let item = serde_dynamo::to_item(UserItem {
             pk: user_pk(user.user_id),
@@ -83,6 +84,53 @@ impl Store {
             }
             None => Ok(None),
         }
+    }
+
+    /// Update the display nickname (never an identifier). Bumps `updated_at`,
+    /// which the `profile` scope surfaces to RPs so they can refresh caches.
+    pub async fn update_nickname(&self, user_id: Uuid, nickname: &str) -> Result<(), StoreError> {
+        self.db
+            .update_item()
+            .table_name(&self.table)
+            .key("PK", s(user_pk(user_id)))
+            .key("SK", s("PROFILE"))
+            .update_expression("SET nickname = :nickname, updated_at = :now")
+            .condition_expression("attribute_exists(PK)")
+            .expression_attribute_values(":nickname", s(nickname.to_string()))
+            .expression_attribute_values(":now", super::n(now()))
+            .send()
+            .await
+            .map_err(map_sdk_err)?;
+        Ok(())
+    }
+
+    /// Set or clear the post-recovery credential-review flag.
+    pub async fn set_pending_credential_review(
+        &self,
+        user_id: Uuid,
+        pending: bool,
+    ) -> Result<(), StoreError> {
+        let update = if pending {
+            "SET pending_credential_review = :val"
+        } else {
+            "REMOVE pending_credential_review"
+        };
+        let mut request = self
+            .db
+            .update_item()
+            .table_name(&self.table)
+            .key("PK", s(user_pk(user_id)))
+            .key("SK", s("PROFILE"))
+            .update_expression(update)
+            .condition_expression("attribute_exists(PK)");
+        if pending {
+            request = request.expression_attribute_values(
+                ":val",
+                aws_sdk_dynamodb::types::AttributeValue::Bool(true),
+            );
+        }
+        request.send().await.map_err(map_sdk_err)?;
+        Ok(())
     }
 
     /// Flip the account status. Used to tombstone (`Deleting`) an account
