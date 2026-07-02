@@ -76,7 +76,7 @@
     "react": "^19.0.0",
     "tsdown": "^0.15.0",
     "typescript": "~5.7.0",
-    "vitest": "^3.0.0"
+    "vitest": "^4.1.9"
   },
   "publishConfig": {
     "access": "public"
