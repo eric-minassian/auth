@@ -49,6 +49,9 @@ use utoipa::OpenApi;
         crate::api::account::delete_account,
         crate::api::account::generate_recovery_codes,
         crate::api::account::recovery_readiness,
+        crate::api::account::update_account,
+        crate::api::account::revoke_other_sessions,
+        crate::api::account::complete_credential_review,
         crate::oidc::token::token,
     ),
     components(schemas(
@@ -70,6 +73,8 @@ use utoipa::OpenApi;
         crate::api::account::RecoveryCodes,
         crate::api::account::RecoveryReadiness,
         crate::api::account::DeletePasskeyResponse,
+        crate::api::account::UpdateAccountRequest,
+        crate::api::account::RevokeOthersResponse,
         crate::oidc::token::TokenRequest,
         crate::oidc::token::TokenResponse,
     )),

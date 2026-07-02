@@ -40,6 +40,13 @@ pub struct User {
     pub status: AccountStatus,
     pub created_at: i64,
     pub updated_at: i64,
+    /// Set when a recovery code was redeemed while older passkeys were still
+    /// registered: the account owner must review (keep or delete) each of
+    /// them before `/oauth/authorize` will issue codes again — the recovery
+    /// scenario is exactly the one where an existing passkey may be in a
+    /// thief's hands.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pending_credential_review: bool,
 }
 
 impl User {

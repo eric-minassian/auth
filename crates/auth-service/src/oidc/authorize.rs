@@ -187,7 +187,21 @@ async fn authorize_impl(
     // incomplete or expired account can never be issued an authorization code).
     let session = match session {
         Some(s) => match state.store.get_user(s.user_id).await {
-            Ok(Some(user)) if user.is_active() => Some(s),
+            Ok(Some(user)) if user.is_active() => {
+                // Post-recovery credential review is unfinished business that
+                // blocks new authorizations: an unreviewed passkey may be the
+                // very credential the recovery was escaping from.
+                if user.pending_credential_review {
+                    if want_none {
+                        return rp_error("interaction_required");
+                    }
+                    return Redirect::to(&format!(
+                        "{issuer}/review-passkeys?return_to={}",
+                        urlencoding(&return_to)
+                    ));
+                }
+                Some(s)
+            }
             Ok(_) => None,
             Err(error) => {
                 tracing::error!(?error, "authorize: user lookup failed");

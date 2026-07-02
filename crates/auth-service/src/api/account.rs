@@ -337,6 +337,107 @@ pub async fn delete_account(
     ))
 }
 
+#[derive(Deserialize, Validate, ToSchema)]
+pub struct UpdateAccountRequest {
+    /// New display nickname (non-unique, mutable, never an identifier).
+    #[garde(length(chars, min = 1, max = 64))]
+    pub nickname: String,
+}
+
+/// PATCH /api/account — update the display nickname. `updated_at` is bumped,
+/// which the `profile` scope surfaces to RPs (id_token/userinfo) so they can
+/// refresh cached copies; the SPA also signals the platform passkey manager
+/// (`signalCurrentUserDetails`) so passkey entries show the new name.
+#[utoipa::path(
+    patch,
+    path = "/api/account",
+    tag = "account",
+    request_body = UpdateAccountRequest,
+    responses(
+        (status = 200, body = super::OkResponse),
+        (status = 400, body = super::ErrorResponse),
+        (status = 403, body = super::ErrorResponse),
+    ),
+)]
+pub async fn update_account(
+    State(state): State<AppState>,
+    FullSession(session): FullSession,
+    Json(req): Json<UpdateAccountRequest>,
+) -> Result<Json<Value>, ApiError> {
+    req.validate()?;
+    rate_limit_account(&state, &session.sid_hash).await?;
+    let nickname = req.nickname.trim();
+    if nickname.is_empty() {
+        return Err(ApiError::BadRequest(
+            "nickname must not be blank".to_string(),
+        ));
+    }
+    state
+        .store
+        .update_nickname(session.user_id, nickname)
+        .await?;
+    tracing::info!(target: "audit", event = "nickname_changed", user_id = %session.user_id);
+    Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct RevokeOthersResponse {
+    pub ok: bool,
+    /// Number of sessions revoked (excludes the caller's own).
+    pub revoked: u32,
+}
+
+/// POST /api/account/sessions/revoke-others — sign out everywhere else: one
+/// call revokes every session except the caller's (each cascading to refresh
+/// families + back-channel logout). One rate token and one audit event for
+/// the whole sweep — the previous SPA-side per-session loop burned a rate
+/// token per session and could rate-limit itself halfway through.
+#[utoipa::path(
+    post,
+    path = "/api/account/sessions/revoke-others",
+    tag = "account",
+    responses((status = 200, body = RevokeOthersResponse), (status = 403, body = super::ErrorResponse)),
+)]
+pub async fn revoke_other_sessions(
+    State(state): State<AppState>,
+    FullSession(session): FullSession,
+) -> Result<Json<Value>, ApiError> {
+    rate_limit_account(&state, &session.sid_hash).await?;
+    let mut revoked = 0u32;
+    for s in state.store.list_sessions(session.user_id).await? {
+        if s.sid_hash != session.sid_hash {
+            revoke_session_cascade(&state, &s).await?;
+            revoked += 1;
+        }
+    }
+    tracing::info!(target: "audit", event = "other_sessions_revoked", user_id = %session.user_id, revoked);
+    Ok(Json(json!({ "ok": true, "revoked": revoked })))
+}
+
+/// POST /api/account/credential-review/complete — the owner has reviewed
+/// (kept or deleted) every passkey that survived a recovery; clear the flag
+/// that blocks `/oauth/authorize`. Deletions themselves go through the
+/// normal passkey-deletion endpoint (with its step-up gate and session
+/// cascade) before this is called.
+#[utoipa::path(
+    post,
+    path = "/api/account/credential-review/complete",
+    tag = "account",
+    responses((status = 200, body = super::OkResponse), (status = 403, body = super::ErrorResponse)),
+)]
+pub async fn complete_credential_review(
+    State(state): State<AppState>,
+    FullSession(session): FullSession,
+) -> Result<Json<Value>, ApiError> {
+    rate_limit_account(&state, &session.sid_hash).await?;
+    state
+        .store
+        .set_pending_credential_review(session.user_id, false)
+        .await?;
+    tracing::info!(target: "audit", event = "credential_review_completed", user_id = %session.user_id);
+    Ok(Json(json!({ "ok": true })))
+}
+
 #[derive(Serialize, ToSchema)]
 pub struct RecoveryCodes {
     pub codes: Vec<String>,
