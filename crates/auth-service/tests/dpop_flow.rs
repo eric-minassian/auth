@@ -57,6 +57,16 @@ impl DpopKey {
     }
 
     fn proof(&self, htm: &str, htu: &str, ath: Option<&str>) -> String {
+        self.proof_with_nonce(htm, htu, ath, None)
+    }
+
+    fn proof_with_nonce(
+        &self,
+        htm: &str,
+        htu: &str,
+        ath: Option<&str>,
+        nonce: Option<&str>,
+    ) -> String {
         let header = serde_json::json!({
             "typ": "dpop+jwt",
             "alg": "ES256",
@@ -70,6 +80,9 @@ impl DpopKey {
         });
         if let Some(ath) = ath {
             payload["ath"] = serde_json::json!(ath);
+        }
+        if let Some(nonce) = nonce {
+            payload["nonce"] = serde_json::json!(nonce);
         }
         let signing_input = format!(
             "{}.{}",
@@ -92,6 +105,29 @@ fn now() -> i64 {
 fn jwt_claims(token: &str) -> serde_json::Value {
     let payload = token.split('.').nth(1).expect("payload segment");
     serde_json::from_slice(&b64u_decode(payload).expect("b64")).expect("json")
+}
+
+/// Harvest the current server nonce via the RFC 9449 §8 challenge: any token
+/// request whose proof lacks the nonce is answered with `use_dpop_nonce` and
+/// a `DPoP-Nonce` header, before the grant itself is touched.
+async fn fetch_dpop_nonce(app: &TestApp, dpop: &DpopKey, token_htu: &str) -> String {
+    let res = app
+        .server
+        .post("/oauth/token")
+        .add_header("dpop", dpop.proof("POST", token_htu, None))
+        .form(&[
+            ("grant_type", "refresh_token"),
+            ("refresh_token", "rt_probe.probe"),
+            ("client_id", "rp"),
+        ])
+        .await;
+    res.assert_status(StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = res.json();
+    assert_eq!(body["error"], "use_dpop_nonce");
+    res.header("dpop-nonce")
+        .to_str()
+        .expect("nonce header")
+        .to_string()
 }
 
 async fn code_for(app: &TestApp, verifier: &str) -> String {
@@ -123,6 +159,7 @@ async fn dpop_binds_refresh_and_userinfo_to_the_proof_key() {
     let dpop = DpopKey::new();
     let token_htu = format!("{}/oauth/token", harness::ISSUER);
     let userinfo_htu = format!("{}/oauth/userinfo", harness::ISSUER);
+    let nonce = fetch_dpop_nonce(&app, &dpop, &token_htu).await;
 
     // Exchange the code WITH a DPoP proof → sender-constrained tokens.
     let verifier = random_b64u(32);
@@ -130,7 +167,7 @@ async fn dpop_binds_refresh_and_userinfo_to_the_proof_key() {
     let res = app
         .server
         .post("/oauth/token")
-        .add_header("dpop", dpop.proof("POST", &token_htu, None))
+        .add_header("dpop", dpop.proof_with_nonce("POST", &token_htu, None, Some(&nonce)))
         .form(&[
             ("grant_type", "authorization_code"),
             ("code", code.as_str()),
@@ -188,7 +225,7 @@ async fn dpop_binds_refresh_and_userinfo_to_the_proof_key() {
     let res = app
         .server
         .post("/oauth/token")
-        .add_header("dpop", dpop.proof("POST", &token_htu, None))
+        .add_header("dpop", dpop.proof_with_nonce("POST", &token_htu, None, Some(&nonce)))
         .form(&[
             ("grant_type", "refresh_token"),
             ("refresh_token", refresh_token.as_str()),
@@ -205,7 +242,7 @@ async fn dpop_binds_refresh_and_userinfo_to_the_proof_key() {
     let res = app
         .server
         .post("/oauth/token")
-        .add_header("dpop", attacker.proof("POST", &token_htu, None))
+        .add_header("dpop", attacker.proof_with_nonce("POST", &token_htu, None, Some(&nonce)))
         .form(&[
             ("grant_type", "refresh_token"),
             ("refresh_token", refresh2.as_str()),
@@ -268,8 +305,13 @@ async fn require_dpop_client_rejects_a_bearer_token_request() {
     assert_eq!(err["error"], "invalid_dpop_proof");
 
     // The same code, now WITH a proof, succeeds — proving it wasn't consumed.
+    // (A nonce-less proof is first challenged, again without consuming the code.)
     let dpop = DpopKey::new();
     let res = exchange(Some(dpop.proof("POST", &token_htu, None))).await;
+    res.assert_status(StatusCode::BAD_REQUEST);
+    assert_eq!(res.json::<serde_json::Value>()["error"], "use_dpop_nonce");
+    let nonce = res.header("dpop-nonce").to_str().expect("nonce").to_string();
+    let res = exchange(Some(dpop.proof_with_nonce("POST", &token_htu, None, Some(&nonce)))).await;
     res.assert_status(StatusCode::OK);
     assert_eq!(res.json::<serde_json::Value>()["token_type"], "DPoP");
 }
@@ -283,7 +325,8 @@ async fn token_request_replaying_a_dpop_proof_is_rejected() {
 
     let dpop = DpopKey::new();
     let token_htu = format!("{}/oauth/token", harness::ISSUER);
-    let proof = dpop.proof("POST", &token_htu, None);
+    let nonce = fetch_dpop_nonce(&app, &dpop, &token_htu).await;
+    let proof = dpop.proof_with_nonce("POST", &token_htu, None, Some(&nonce));
 
     let verifier = random_b64u(32);
     let code = code_for(&app, &verifier).await;
@@ -312,4 +355,48 @@ async fn token_request_replaying_a_dpop_proof_is_rejected() {
     res.assert_status(StatusCode::BAD_REQUEST);
     let err: serde_json::Value = res.json();
     assert_eq!(err["error"], "invalid_dpop_proof");
+}
+
+#[tokio::test]
+async fn token_endpoint_challenges_for_and_accepts_the_server_nonce() {
+    let mut app = TestApp::spawn().await;
+    app.seed_client(&rp_client()).await;
+    let mut authn = flows::new_authenticator();
+    flows::signup_with_passkey(&mut app, "nonce-dpop@example.com", &mut authn).await;
+
+    let dpop = DpopKey::new();
+    let token_htu = format!("{}/oauth/token", harness::ISSUER);
+
+    let verifier = random_b64u(32);
+    let code = code_for(&app, &verifier).await;
+    let exchange = |proof: String| {
+        app.server
+            .post("/oauth/token")
+            .add_header("dpop", proof)
+            .form(&[
+                ("grant_type", "authorization_code".to_string()),
+                ("code", code.clone()),
+                ("redirect_uri", RP_CALLBACK.to_string()),
+                ("client_id", "rp".to_string()),
+                ("code_verifier", verifier.clone()),
+            ])
+    };
+
+    // A proof without the server nonce is challenged (RFC 9449 §8) and the
+    // code is NOT consumed.
+    let res = exchange(dpop.proof("POST", &token_htu, None)).await;
+    res.assert_status(StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = res.json();
+    assert_eq!(body["error"], "use_dpop_nonce");
+    let nonce = res.header("dpop-nonce").to_str().expect("nonce").to_string();
+
+    // A proof with a bogus nonce is challenged again.
+    let res = exchange(dpop.proof_with_nonce("POST", &token_htu, None, Some("bogus"))).await;
+    res.assert_status(StatusCode::BAD_REQUEST);
+    assert_eq!(res.json::<serde_json::Value>()["error"], "use_dpop_nonce");
+
+    // Echoing the challenged nonce succeeds with the same code.
+    let res = exchange(dpop.proof_with_nonce("POST", &token_htu, None, Some(&nonce))).await;
+    res.assert_status(StatusCode::OK);
+    assert_eq!(res.json::<serde_json::Value>()["token_type"], "DPoP");
 }

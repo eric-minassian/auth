@@ -31,6 +31,9 @@ pub struct DpopProof {
     pub jkt: String,
     /// The proof's unique id, recorded to reject replays within the window.
     pub jti: String,
+    /// Server-issued nonce echoed by the proof (RFC 9449 §8), if any. The
+    /// token endpoint requires a currently-valid one.
+    pub nonce: Option<String>,
 }
 
 /// Verify a DPoP proof against the request it claims to bind.
@@ -124,8 +127,41 @@ pub fn verify_proof(
     {
         return Err("ath");
     }
+    let nonce = payload
+        .get("nonce")
+        .and_then(Value::as_str)
+        .filter(|n| !n.is_empty() && n.len() <= 128)
+        .map(str::to_string);
 
-    Ok(DpopProof { jkt, jti })
+    Ok(DpopProof { jkt, jti, nonce })
+}
+
+// ---- Server-provided nonce (RFC 9449 §8) -----------------------------------
+
+/// Nonce rotation window. A nonce is accepted for its own bucket and the next
+/// window after it (current + previous bucket), so a client-cached nonce stays
+/// valid for at least this long and at most twice it.
+pub const NONCE_BUCKET_SECS: i64 = 300;
+
+/// The nonce the server currently hands out: HMAC over the time bucket,
+/// derivable by every instance from the shared key — no per-nonce storage.
+pub fn current_nonce(key: &[u8; 32], now: i64) -> String {
+    nonce_for_bucket(key, now / NONCE_BUCKET_SECS)
+}
+
+/// Whether a proof's echoed nonce is one we issued recently (current or
+/// previous bucket). Constant-time comparison.
+pub fn nonce_is_valid(key: &[u8; 32], nonce: &str, now: i64) -> bool {
+    let bucket = now / NONCE_BUCKET_SECS;
+    crate::crypto::ct_eq(nonce, &nonce_for_bucket(key, bucket))
+        || crate::crypto::ct_eq(nonce, &nonce_for_bucket(key, bucket - 1))
+}
+
+fn nonce_for_bucket(key: &[u8; 32], bucket: i64) -> String {
+    crate::crypto::b64u(crate::crypto::hmac_sha256(
+        key,
+        format!("dpop-nonce:{bucket}"),
+    ))
 }
 
 /// `ath` (access-token hash) carried by resource-server proofs:
@@ -341,6 +377,31 @@ mod tests {
             serde_json::json!({ "jti": "j", "htm": "GET", "htu": "https://a/userinfo", "iat": 1 }),
         );
         assert!(verify_proof(&no_ath, "GET", "https://a/userinfo", Some("good"), 1).is_err());
+    }
+
+    #[test]
+    fn nonce_accepts_current_and_previous_bucket_only() {
+        let key = [7u8; 32];
+        let now = 1_000_000;
+        let current = current_nonce(&key, now);
+        assert!(nonce_is_valid(&key, &current, now));
+        // Still valid right after the bucket rolls over…
+        assert!(nonce_is_valid(&key, &current, now + NONCE_BUCKET_SECS));
+        // …but not two buckets later, nor for garbage, nor under another key.
+        assert!(!nonce_is_valid(&key, &current, now + 2 * NONCE_BUCKET_SECS));
+        assert!(!nonce_is_valid(&key, "bogus", now));
+        assert!(!nonce_is_valid(&[8u8; 32], &current, now));
+    }
+
+    #[test]
+    fn proof_nonce_is_surfaced() {
+        let p = Proofer::new();
+        let proof = p.proof(
+            p.header(),
+            serde_json::json!({ "jti": "j", "htm": "POST", "htu": "https://a/t", "iat": 1, "nonce": "srv" }),
+        );
+        let verified = verify_proof(&proof, "POST", "https://a/t", None, 1).unwrap();
+        assert_eq!(verified.nonce.as_deref(), Some("srv"));
     }
 
     #[test]

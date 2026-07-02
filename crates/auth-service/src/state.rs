@@ -1,11 +1,12 @@
 use std::sync::Arc;
 
+use tokio::sync::OnceCell;
 use webauthn_rs::prelude::WebauthnError;
 use webauthn_rs::{Webauthn, WebauthnBuilder};
 
 use crate::config::AppConfig;
 use crate::jwt::Signer;
-use crate::store::Store;
+use crate::store::{Store, StoreError};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -16,6 +17,9 @@ pub struct AppState {
     /// HTTP client for back-channel logout dispatch (short timeout,
     /// best-effort).
     pub http: reqwest::Client,
+    /// Server-wide DPoP nonce key (RFC 9449 §8), fetched from the store once
+    /// per process and cached — nonces are derived, never stored.
+    dpop_nonce_key: Arc<OnceCell<[u8; 32]>>,
 }
 
 impl AppState {
@@ -33,6 +37,15 @@ impl AppState {
             signer: Arc::new(signer),
             webauthn: Arc::new(webauthn),
             http,
+            dpop_nonce_key: Arc::new(OnceCell::new()),
         })
+    }
+
+    /// The shared DPoP nonce key, loaded (or created) on first use.
+    pub async fn dpop_nonce_key(&self) -> Result<[u8; 32], StoreError> {
+        self.dpop_nonce_key
+            .get_or_try_init(|| self.store.get_or_create_dpop_nonce_key())
+            .await
+            .copied()
     }
 }

@@ -69,6 +69,7 @@ pub async fn token(
         return Err(OAuthError {
             error: "slow_down",
             description: "rate limited",
+            dpop_nonce: None,
         });
     }
 
@@ -111,6 +112,7 @@ fn invalid_dpop(description: &'static str) -> OAuthError {
     OAuthError {
         error: "invalid_dpop_proof",
         description,
+        dpop_nonce: None,
     }
 }
 
@@ -133,8 +135,23 @@ async fn dpop_binding(
     let proof = first
         .to_str()
         .map_err(|_| invalid_dpop("malformed DPoP header"))?;
-    let verified = dpop::verify_proof(proof, "POST", htu, None, now())
+    let ts = now();
+    let verified = dpop::verify_proof(proof, "POST", htu, None, ts)
         .map_err(|_| invalid_dpop("invalid DPoP proof"))?;
+    // RFC 9449 §8: the proof must echo a fresh server nonce, so proofs can't
+    // be pre-minted long in advance of use. Challenged clients (the SDK, and
+    // any conformant DPoP client) retry once with the nonce echoed. Checked
+    // before the jti write so a challenge costs no storage.
+    let nonce_key = state.dpop_nonce_key().await?;
+    if !verified
+        .nonce
+        .as_deref()
+        .is_some_and(|n| dpop::nonce_is_valid(&nonce_key, n, ts))
+    {
+        return Err(OAuthError::use_dpop_nonce(dpop::current_nonce(
+            &nonce_key, ts,
+        )));
+    }
     // One-time-use: reject a replayed proof.
     if !state
         .store

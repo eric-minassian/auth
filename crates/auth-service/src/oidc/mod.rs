@@ -17,9 +17,13 @@ use serde_json::json;
 
 /// RFC 6749 §5.2 error response for the token/revocation endpoints.
 /// Descriptions are deliberately non-specific (no "expired vs replayed").
+#[derive(Default)]
 pub struct OAuthError {
     pub error: &'static str,
     pub description: &'static str,
+    /// Fresh server nonce for a `use_dpop_nonce` challenge (RFC 9449 §8),
+    /// emitted as a `DPoP-Nonce` response header.
+    pub dpop_nonce: Option<String>,
 }
 
 impl OAuthError {
@@ -27,6 +31,18 @@ impl OAuthError {
         Self {
             error: "invalid_request",
             description,
+            ..Self::default()
+        }
+    }
+
+    /// RFC 9449 §8: the client must retry with this server nonce echoed in a
+    /// fresh proof. The SDK (and any conformant DPoP client) does so
+    /// transparently.
+    pub fn use_dpop_nonce(nonce: String) -> Self {
+        Self {
+            error: "use_dpop_nonce",
+            description: "a server nonce is required in the DPoP proof",
+            dpop_nonce: Some(nonce),
         }
     }
 
@@ -34,6 +50,7 @@ impl OAuthError {
         Self {
             error: "invalid_grant",
             description: "the provided grant is invalid",
+            ..Self::default()
         }
     }
 
@@ -41,6 +58,7 @@ impl OAuthError {
         Self {
             error: "invalid_client",
             description: "unknown client",
+            ..Self::default()
         }
     }
 
@@ -48,6 +66,7 @@ impl OAuthError {
         Self {
             error: "unsupported_grant_type",
             description: "only authorization_code and refresh_token are supported",
+            ..Self::default()
         }
     }
 
@@ -55,6 +74,7 @@ impl OAuthError {
         Self {
             error: "server_error",
             description: "internal error",
+            ..Self::default()
         }
     }
 }
@@ -66,12 +86,18 @@ impl IntoResponse for OAuthError {
             "server_error" => StatusCode::INTERNAL_SERVER_ERROR,
             _ => StatusCode::BAD_REQUEST,
         };
-        (
+        let mut response = (
             status,
             [(header::CACHE_CONTROL, "no-store")],
             Json(json!({ "error": self.error, "error_description": self.description })),
         )
-            .into_response()
+            .into_response();
+        if let Some(nonce) = self.dpop_nonce
+            && let Ok(value) = axum::http::HeaderValue::from_str(&nonce)
+        {
+            response.headers_mut().insert("dpop-nonce", value);
+        }
+        response
     }
 }
 
