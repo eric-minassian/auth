@@ -45,6 +45,7 @@ export type WebAuthnErrorCode =
   | "already_registered"
   | "not_discoverable"
   | "security"
+  | "stale_credential"
   | "unknown";
 
 /**
@@ -97,6 +98,8 @@ export function webAuthnErrorMessage(code: WebAuthnErrorCode): string {
       return "This device couldn't store a sign-in-ready passkey. Try a platform authenticator (Touch ID, Windows Hello, or a passkey manager).";
     case "security":
       return "Couldn't verify this site for passkeys. Make sure you're on the official site, then try again.";
+    case "stale_credential":
+      return "That passkey no longer exists for this account, so it's been removed from this device's list. Use another passkey or a recovery code.";
     case "unknown":
       return "Something went wrong with your passkey. Please try again.";
   }
@@ -244,10 +247,21 @@ export async function loginWithPasskey(opts?: {
     ...(opts?.conditional ? { mediation: "conditional" as const } : {}),
     ...(opts?.signal ? { signal: opts.signal } : {}),
   });
-  await api.post("/api/webauthn/login/finish", {
-    ceremony_id: start.ceremony_id,
-    credential: credential.toJSON(),
-  });
+  try {
+    await api.post("/api/webauthn/login/finish", {
+      ceremony_id: start.ceremony_id,
+      credential: credential.toJSON(),
+    });
+  } catch (e) {
+    // The server has no record of this credential (deleted on another
+    // device): tell the platform manager to prune the ghost entry, then
+    // surface actionable copy instead of a generic failure.
+    if (e instanceof ApiError && e.code === "unknown_credential") {
+      await signalUnknownCredential(credential.id);
+      throw new WebAuthnError("stale_credential");
+    }
+    throw e;
+  }
 }
 
 // ---- Step-up re-authentication ---------------------------------------------
@@ -336,6 +350,19 @@ interface SignalCapableStatic {
     userId: string;
     allAcceptedCredentialIds: string[];
   }) => Promise<void>;
+  signalUnknownCredential?: (options: { rpId: string; credentialId: string }) => Promise<void>;
+  signalCurrentUserDetails?: (options: {
+    rpId: string;
+    userId: string;
+    name: string;
+    displayName: string;
+  }) => Promise<void>;
+}
+
+function signalCapable(): (typeof PublicKeyCredential & SignalCapableStatic) | undefined {
+  return (typeof PublicKeyCredential !== "undefined" ? PublicKeyCredential : undefined) as
+    | (typeof PublicKeyCredential & SignalCapableStatic)
+    | undefined;
 }
 
 /**
@@ -349,9 +376,7 @@ export async function signalAcceptedCredentials(
   userIdUuid: string,
   credentialIds: string[],
 ): Promise<void> {
-  const pk = (
-    typeof PublicKeyCredential !== "undefined" ? PublicKeyCredential : undefined
-  ) as (typeof PublicKeyCredential & SignalCapableStatic) | undefined;
+  const pk = signalCapable();
   if (!pk || typeof pk.signalAllAcceptedCredentials !== "function") return;
   try {
     await pk.signalAllAcceptedCredentials({
@@ -359,6 +384,46 @@ export async function signalAcceptedCredentials(
       // The user handle is the raw 16-byte UUID, base64url-encoded.
       userId: uuidToBase64url(userIdUuid),
       allAcceptedCredentialIds: credentialIds,
+    });
+  } catch {
+    // Purely advisory; never block the UI on a sync hint.
+  }
+}
+
+/**
+ * Best-effort WebAuthn Signal API: the asserted credential is unknown to the
+ * server (deleted elsewhere) — let the platform manager prune the ghost entry
+ * on this device. Silently no-ops where unsupported.
+ */
+export async function signalUnknownCredential(credentialId: string): Promise<void> {
+  const pk = signalCapable();
+  if (!pk || typeof pk.signalUnknownCredential !== "function") return;
+  try {
+    await pk.signalUnknownCredential({
+      rpId: window.location.hostname,
+      credentialId,
+    });
+  } catch {
+    // Purely advisory; never block the UI on a sync hint.
+  }
+}
+
+/**
+ * Best-effort WebAuthn Signal API: the account's display name changed — keep
+ * the passkey entries in the platform manager labeled correctly.
+ */
+export async function signalCurrentUserDetails(
+  userIdUuid: string,
+  nickname: string,
+): Promise<void> {
+  const pk = signalCapable();
+  if (!pk || typeof pk.signalCurrentUserDetails !== "function") return;
+  try {
+    await pk.signalCurrentUserDetails({
+      rpId: window.location.hostname,
+      userId: uuidToBase64url(userIdUuid),
+      name: nickname,
+      displayName: nickname,
     });
   } catch {
     // Purely advisory; never block the UI on a sync hint.

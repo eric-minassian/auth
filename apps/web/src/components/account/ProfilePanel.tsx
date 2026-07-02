@@ -8,19 +8,41 @@ import {
   CardTitle,
 } from "@eric-minassian/design/components/card";
 import { Field, FieldDescription, FieldLabel } from "@eric-minassian/design/components/field";
+import { Input } from "@eric-minassian/design/components/input";
 import { useNavigate } from "@tanstack/react-router";
+import { useState } from "react";
 
 import { useAccountMutation } from "../../hooks/useAccountMutation.js";
 import { api, type SessionInfo } from "../../lib/api.js";
-import { signalAcceptedCredentials, withStepUp } from "../../lib/webauthn.js";
+import {
+  signalAcceptedCredentials,
+  signalCurrentUserDetails,
+  withStepUp,
+} from "../../lib/webauthn.js";
 import { ConfirmDelete } from "../ConfirmDelete.js";
 import { CopyField } from "../CopyField.js";
 import { initials } from "../../lib/initials.js";
 
 export function ProfilePanel(props: { session: SessionInfo }) {
   const { user } = props.session;
-  const { run, busy } = useAccountMutation();
+  const { run, busy, isPending } = useAccountMutation();
   const navigate = useNavigate();
+  const [nickname, setNickname] = useState(user.nickname);
+  const trimmed = nickname.trim();
+  const nicknameDirty = trimmed !== user.nickname && trimmed.length > 0 && trimmed.length <= 64;
+
+  function saveNickname() {
+    void run(
+      "nickname",
+      async () => {
+        await api.patch("/api/account", { nickname: trimmed });
+        // Keep the passkey entries in this device's manager labeled with the
+        // new name (best-effort WebAuthn Signal API).
+        await signalCurrentUserDetails(user.user_id, trimmed);
+      },
+      { success: "Name updated", error: "Could not update your name" },
+    );
+  }
 
   function deleteAccount() {
     void run(
@@ -57,6 +79,32 @@ export function ProfilePanel(props: { session: SessionInfo }) {
               </p>
             </div>
           </div>
+          <Field>
+            <FieldLabel htmlFor="nickname">Display name</FieldLabel>
+            <div className="flex gap-2">
+              <Input
+                id="nickname"
+                value={nickname}
+                maxLength={64}
+                autoComplete="off"
+                onChange={(e) => setNickname(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && nicknameDirty && !busy) saveNickname();
+                }}
+              />
+              <Button
+                size="sm"
+                className="self-center"
+                onClick={saveNickname}
+                disabled={!nicknameDirty || busy}
+              >
+                {isPending("nickname") ? "Saving…" : "Save"}
+              </Button>
+            </div>
+            <FieldDescription>
+              Apps see the new name the next time they refresh your profile.
+            </FieldDescription>
+          </Field>
           <Field>
             <FieldLabel htmlFor="sub">User ID (sub)</FieldLabel>
             <CopyField id="sub" value={user.user_id} label="User ID (sub)" />

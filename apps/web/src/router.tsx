@@ -15,6 +15,7 @@ import { errorRoute } from "./routes/error.js";
 import { indexRoute } from "./routes/index.js";
 import { logoutRoute } from "./routes/logout.js";
 import { recoverRoute } from "./routes/recover.js";
+import { reviewPasskeysRoute } from "./routes/review-passkeys.js";
 import { rootRoute } from "./routes/root.js";
 import { signInRoute } from "./routes/sign-in.js";
 import { signUpRoute } from "./routes/sign-up.js";
@@ -25,6 +26,7 @@ const routeTree = rootRoute.addChildren([
     signInRoute,
     signUpRoute,
     recoverRoute,
+    reviewPasskeysRoute,
     logoutRoute,
     errorRoute,
   ]),
