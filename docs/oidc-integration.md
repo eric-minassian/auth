@@ -68,6 +68,13 @@ adapters wire this up; a hand-built `Request` must carry the real method/URL and
 the `DPoP` header. `require_dpop` can be set per client to reject unbound tokens
 at the token endpoint outright.
 
+The token endpoint requires a **server-provided nonce** in every proof
+(RFC 9449 §8): a proof without one is answered with
+`400 {"error":"use_dpop_nonce"}` plus a `DPoP-Nonce` header, and the client
+retries once with the nonce echoed in a fresh proof. The SDK (and any
+conformant DPoP client) does this transparently; nonces stay valid for at
+least five minutes, so steady-state traffic pays no extra round-trips.
+
 ## Everything else is standard OAuth 2.1 / OIDC
 
 PKCE S256 is mandatory for every client; exact `redirect_uri` string match; auth-code
