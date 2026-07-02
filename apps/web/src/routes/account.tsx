@@ -25,6 +25,7 @@ import {
   UserIcon,
 } from "lucide-react";
 import { useCallback } from "react";
+import { toast } from "sonner";
 
 import { OverviewPanel } from "../components/account/OverviewPanel.js";
 import { PasskeysPanel } from "../components/account/PasskeysPanel.js";
@@ -94,7 +95,14 @@ function AccountPage() {
   }, [navigate]);
 
   async function signOut() {
-    await api.post("/api/session/logout").catch(() => undefined);
+    try {
+      // A failure must stay visible: leaving the account page while the
+      // session cookie is still live would fake a sign-out.
+      await api.post("/api/session/logout");
+    } catch {
+      toast.error("Couldn't sign you out — check your connection and try again.");
+      return;
+    }
     void navigate({ to: "/sign-in" });
   }
 

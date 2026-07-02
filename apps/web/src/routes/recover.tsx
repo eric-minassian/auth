@@ -17,9 +17,14 @@ import {
 } from "../lib/webauthn.js";
 import { centeredLayoutRoute } from "./_centered.js";
 
+interface RecoverSearch {
+  return_to?: string;
+}
+
 function Recover() {
   useTitle("Recover account");
   const navigate = useNavigate();
+  const { return_to } = recoverRoute.useSearch();
   const [code, setCode] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | undefined>();
@@ -47,7 +52,8 @@ function Recover() {
       title="Recover your account"
       description="Enter a recovery code to register a new passkey."
       footer={
-        <Link to="/sign-in" className="text-primary underline">
+        // Carry return_to so a mid-OAuth user still lands back at the RP.
+        <Link to="/sign-in" search={{ return_to }} className="text-primary underline">
           Back to sign in
         </Link>
       }
@@ -67,7 +73,8 @@ function Recover() {
           value={code}
           onChange={(e) => setCode(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === "Enter" && code.trim()) void recover();
+            // busy gate: a double Enter must not redeem a second one-time code.
+            if (e.key === "Enter" && !busy && code.trim()) void recover();
           }}
         />
       </Field>
@@ -91,5 +98,8 @@ function Recover() {
 export const recoverRoute = createRoute({
   getParentRoute: () => centeredLayoutRoute,
   path: "/recover",
+  validateSearch: (search: Record<string, unknown>): RecoverSearch => ({
+    return_to: typeof search.return_to === "string" ? search.return_to : undefined,
+  }),
   component: Recover,
 });

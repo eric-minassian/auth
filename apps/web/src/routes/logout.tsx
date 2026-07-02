@@ -1,3 +1,4 @@
+import { Alert, AlertDescription } from "@eric-minassian/design/components/alert";
 import { Button } from "@eric-minassian/design/components/button";
 import { Spinner } from "@eric-minassian/design/components/spinner";
 import { createRoute } from "@tanstack/react-router";
@@ -17,12 +18,18 @@ function Logout() {
   useTitle("Sign out");
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState(false);
+  const [failed, setFailed] = useState(false);
 
   async function signOutEverywhere() {
     setBusy(true);
+    setFailed(false);
     try {
-      await api.post("/api/session/logout").catch(() => undefined);
+      // A failure must stay visible: claiming "signed out" while the session
+      // cookie is still live would be a lie with security consequences.
+      await api.post("/api/session/logout");
       setDone(true);
+    } catch {
+      setFailed(true);
     } finally {
       setBusy(false);
     }
@@ -33,6 +40,14 @@ function Logout() {
       title="Sign out"
       description={done ? "You've been signed out." : "Sign out of this account everywhere?"}
     >
+      {failed ? (
+        <Alert variant="destructive">
+          <AlertDescription>
+            Couldn&apos;t sign you out — you may still be signed in. Check your connection and
+            try again.
+          </AlertDescription>
+        </Alert>
+      ) : null}
       {done ? (
         <Button size="lg" className="w-full" onClick={() => location.assign("/sign-in")}>
           Back to sign in
@@ -46,7 +61,7 @@ function Logout() {
           disabled={busy}
         >
           {busy ? <Spinner /> : null}
-          Sign out
+          {failed ? "Try again" : "Sign out"}
         </Button>
       )}
     </AuthCard>
