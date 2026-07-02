@@ -211,6 +211,11 @@ export const accountRoute = createRoute({
   beforeLoad: async () => {
     try {
       const session = await api.get<SessionInfo>("/api/session");
+      // Unfinished post-recovery review outranks account management: the
+      // server refuses to authorize RPs until it's done, so route there.
+      if (session.user.pending_credential_review) {
+        throw redirect({ to: "/review-passkeys", search: {} });
+      }
       return { session };
     } catch (e) {
       // Only an auth failure means "not signed in" — bounce to sign-in. Any
