@@ -37,10 +37,7 @@ pub struct KmsSigner {
 impl KmsSigner {
     /// Fetch the public key of every keyring member and derive JWKs + kids.
     /// `key_ids[0]` becomes the active signing key. Call once at cold start.
-    pub async fn new(
-        client: aws_sdk_kms::Client,
-        key_ids: Vec<String>,
-    ) -> Result<Self, SignError> {
+    pub async fn new(client: aws_sdk_kms::Client, key_ids: Vec<String>) -> Result<Self, SignError> {
         if key_ids.is_empty() {
             return Err(SignError::Signature("empty KMS keyring".to_string()));
         }
