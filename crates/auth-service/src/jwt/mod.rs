@@ -34,11 +34,21 @@ impl Signer {
         }
     }
 
-    /// Public JWK (ES256, P-256) for the JWKS endpoint.
+    /// The active signing key's public JWK (ES256, P-256).
     pub fn public_jwk(&self) -> serde_json::Value {
         match self {
             Self::Local(s) => s.public_jwk(),
             Self::Kms(s) => s.public_jwk(),
+        }
+    }
+
+    /// Every published public JWK, active first — the JWKS document. During
+    /// publish-before-sign rotation this includes the standby (next) and any
+    /// retired keys still within verifier windows.
+    pub fn public_jwks(&self) -> Vec<serde_json::Value> {
+        match self {
+            Self::Local(s) => vec![s.public_jwk()],
+            Self::Kms(s) => s.public_jwks(),
         }
     }
 

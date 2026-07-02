@@ -18,13 +18,27 @@ async fn main() -> Result<(), Error> {
     let aws = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
     let store = Store::new(aws_sdk_dynamodb::Client::new(&aws), cfg.table_name.clone());
 
-    // Production signs with KMS (non-extractable key). A PEM fallback exists
-    // only for environments where KMS isn't wired (e.g. an ad-hoc test stage).
-    let signer = match std::env::var("KMS_KEY_ID") {
-        Ok(key_id) => Signer::Kms(KmsSigner::new(aws_sdk_kms::Client::new(&aws), key_id).await?),
-        Err(_) => match std::env::var("SIGNING_KEY_PEM") {
+    // Production signs with a KMS keyring (non-extractable keys):
+    // KMS_KEY_IDS is a comma-separated list, first = active signer, rest =
+    // published-only (publish-before-sign rotation; runbook in
+    // docs/deploy.md). KMS_KEY_ID remains as a single-key fallback. A PEM
+    // fallback exists only for environments where KMS isn't wired.
+    let keyring = std::env::var("KMS_KEY_IDS")
+        .or_else(|_| std::env::var("KMS_KEY_ID"))
+        .map(|ids| {
+            ids.split(',')
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        });
+    let signer = match keyring {
+        Ok(key_ids) if !key_ids.is_empty() => {
+            Signer::Kms(KmsSigner::new(aws_sdk_kms::Client::new(&aws), key_ids).await?)
+        }
+        _ => match std::env::var("SIGNING_KEY_PEM") {
             Ok(pem) => Signer::Local(LocalSigner::from_pem(&pem)?),
-            Err(_) => return Err("neither KMS_KEY_ID nor SIGNING_KEY_PEM is set".into()),
+            Err(_) => return Err("neither KMS_KEY_IDS nor SIGNING_KEY_PEM is set".into()),
         },
     };
 

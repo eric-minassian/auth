@@ -33,6 +33,12 @@ export interface AuthConfig {
   lambdaAssetPath: string;
   /** Filesystem path (relative to infra/) of the built SPA dist dir. */
   spaAssetPath: string;
+  /**
+   * Which JWT signing key is active ("a" or "b"). Both keys are always
+   * provisioned and published in JWKS; flipping this value is the
+   * publish-before-sign rotation switch (runbook: docs/deploy.md).
+   */
+  activeSigningKey: "a" | "b";
 }
 
 /**
