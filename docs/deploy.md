@@ -47,6 +47,48 @@ The pipeline **never** deploys `AuthCiRole` — that role is what the pipeline a
 so it must already exist (see bring-up below). Prod is unattended; if you want a human
 gate, add a required reviewer to the `prod` GitHub Environment.
 
+After the deploy, the pipeline runs a **smoke test** from the public internet
+(discovery issuer, JWKS non-empty, SPA shell) and fails the run if prod is broken.
+A CloudWatch Synthetics **canary** repeats those checks every 15 minutes and alarms
+via the `SecurityAlarms` SNS topic if they fail (or if the canary stops running).
+
+## Alerting (one-time setup)
+
+Alarms (audit signals, Lambda errors/throttles, API 5xx, canary failures) publish to
+the `SecurityAlarms` SNS topic. The subscription email is **never committed** (public
+repo); the pipeline reads it from SSM at deploy time and passes `-c alertEmail=...`:
+
+```sh
+# prod account, one time; the next pipeline deploy wires the subscription.
+aws ssm put-parameter --name /auth/alert-email --type String --value you@example.com
+```
+
+Requires the deploy role's `ReadAlertEmail` grant (re-deploy `AuthCiRole` once with
+admin creds if the role predates it). Confirm the SNS subscription email when it
+arrives — unconfirmed subscriptions receive nothing.
+
+## Backups & restore
+
+The DynamoDB table (`AuthStateful`) is the **only copy of every account, passkey
+record, and recovery-code hash** — and recovery is unrecoverable by design, so losing
+it is losing every account permanently. Three layers protect it in prod:
+
+1. `deletionProtection` on the table — blocks `DeleteTable` outright (flip it off
+   consciously, in code, to ever remove the table).
+2. **PITR** (35-day point-in-time window) — recovers from bad writes:
+   `aws dynamodb restore-table-to-point-in-time` into a new table, then repoint
+   `TABLE_NAME`.
+3. **AWS Backup** (daily, 5-week retention + monthly, 1-year) — snapshots survive
+   table deletion, unlike PITR. Restore from the vault:
+   `aws backup start-restore-job` (or console → Backup vault → recovery point →
+   Restore), restore to a new table name, verify contents, then repoint the app.
+
+A restored table arrives **without** the app stack's grants pointing at it — the
+fastest correct repoint is: restore to a new name, update `TABLE_NAME` via a stack
+deploy that imports the restored table, and keep the damaged original retained for
+forensics. Not yet done (needs AWS Organizations work): **cross-account backup
+copy**, the hedge against prod-account compromise itself.
+
 ## One-time bring-up
 
 ### 1. DNS delegation roles (management account)

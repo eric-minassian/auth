@@ -1,4 +1,5 @@
 import * as cdk from "aws-cdk-lib";
+import * as backup from "aws-cdk-lib/aws-backup";
 import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
 import * as iam from "aws-cdk-lib/aws-iam";
 import * as kms from "aws-cdk-lib/aws-kms";
@@ -62,7 +63,31 @@ export class AuthStatefulStack extends cdk.Stack {
       ],
       pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
       removalPolicy: cdk.RemovalPolicy.RETAIN,
+      // RETAIN protects against stack deletion; this blocks DeleteTable itself
+      // (console mistake, compromised deploy credentials). The table is the
+      // only copy of every credential in a system whose recovery is
+      // unrecoverable by design. Off in `local` so a dev can tear down freely.
+      deletionProtection: config.name === "prod",
     });
+
+    // PITR dies with the table — AWS Backup snapshots survive it (and RETAIN
+    // can't help against an explicit delete + name reuse). Daily for 5 weeks,
+    // monthly for a year. TODO: copy-to-second-account via the org's backup
+    // vault would also hedge account compromise; needs org-level setup first
+    // (see docs/deploy.md).
+    if (config.name === "prod") {
+      const vault = new backup.BackupVault(this, "BackupVault", {
+        removalPolicy: cdk.RemovalPolicy.RETAIN,
+      });
+      const plan = new backup.BackupPlan(this, "BackupPlan", {
+        backupVault: vault,
+      });
+      plan.addRule(backup.BackupPlanRule.daily());
+      plan.addRule(backup.BackupPlanRule.monthly1Year());
+      plan.addSelection("Table", {
+        resources: [backup.BackupResource.fromDynamoDbTable(this.table)],
+      });
+    }
 
     this.signingKey = new kms.Key(this, "JwtSigningKey", {
       keySpec: kms.KeySpec.ECC_NIST_P256,

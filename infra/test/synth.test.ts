@@ -18,11 +18,11 @@ const config: AuthConfig = {
   spaAssetPath: "assets/spa-placeholder",
 };
 
-function synth() {
+function synth(cfg: AuthConfig = config) {
   const app = new cdk.App();
-  const stateful = new AuthStatefulStack(app, "AuthStateful", config, { env: config.env });
-  const appStack = new AuthAppStack(app, "AuthApp", config, {
-    env: config.env,
+  const stateful = new AuthStatefulStack(app, "AuthStateful", cfg, { env: cfg.env });
+  const appStack = new AuthAppStack(app, "AuthApp", cfg, {
+    env: cfg.env,
     hostedZone: stateful.hostedZone,
     table: stateful.table,
     signingKey: stateful.signingKey,
@@ -32,6 +32,13 @@ function synth() {
     app: Template.fromStack(appStack),
   };
 }
+
+/** `local`-shaped config: prod-only guards (backup, canary) must be absent. */
+const localConfig: AuthConfig = {
+  ...config,
+  name: "local",
+  subdomain: "dev.auth",
+};
 
 describe("AuthStateful", () => {
   const { stateful } = synth();
@@ -74,6 +81,39 @@ describe("AuthStateful", () => {
       KeyUsage: "SIGN_VERIFY",
     });
     stateful.hasResource("AWS::KMS::Key", { DeletionPolicy: "Retain" });
+  });
+
+  it("blocks DeleteTable in prod (the table is the only copy of every credential)", () => {
+    // TableV2 synthesizes a GlobalTable: the flag is per-replica.
+    stateful.hasResourceProperties("AWS::DynamoDB::GlobalTable", {
+      Replicas: Match.arrayWith([
+        Match.objectLike({ DeletionProtectionEnabled: true }),
+      ]),
+    });
+    // local keeps teardown ergonomic — protection is a prod guard.
+    synth(localConfig).stateful.hasResourceProperties("AWS::DynamoDB::GlobalTable", {
+      Replicas: Match.arrayWith([
+        Match.objectLike({ DeletionProtectionEnabled: false }),
+      ]),
+    });
+  });
+
+  it("backs the table with AWS Backup in prod (snapshots survive table deletion)", () => {
+    stateful.resourceCountIs("AWS::Backup::BackupVault", 1);
+    stateful.hasResourceProperties("AWS::Backup::BackupPlan", {
+      BackupPlan: Match.objectLike({
+        // Daily 5-week + monthly 1-year: rules carry lifecycle deletes.
+        BackupPlanRule: Match.arrayWith([
+          Match.objectLike({ RuleName: Match.stringLikeRegexp("Daily") }),
+          Match.objectLike({ RuleName: Match.stringLikeRegexp("Monthly") }),
+        ]),
+      }),
+    });
+    stateful.resourceCountIs("AWS::Backup::BackupSelection", 1);
+    // Backups must not die with the stack.
+    stateful.hasResource("AWS::Backup::BackupVault", { DeletionPolicy: "Retain" });
+    // local: no backup spend for dev accounts.
+    synth(localConfig).stateful.resourceCountIs("AWS::Backup::BackupVault", 0);
   });
 });
 
@@ -299,6 +339,64 @@ describe("AuthApp", () => {
     });
   });
 
+  it("logs WAF decisions to a retained aws-waf-logs-* CloudWatch group", () => {
+    // WAF requires the `aws-waf-logs-` name prefix; without logs there is no
+    // data to tune the COUNT-mode managed rules toward BLOCK.
+    app.hasResourceProperties("AWS::Logs::LogGroup", {
+      LogGroupName: "aws-waf-logs-auth-prod",
+      RetentionInDays: 180,
+    });
+    app.resourceCountIs("AWS::WAFv2::LoggingConfiguration", 1);
+  });
+
+  it("writes CloudFront access logs to a lifecycle-expired private bucket", () => {
+    app.hasResourceProperties("AWS::CloudFront::Distribution", {
+      DistributionConfig: Match.objectLike({
+        Logging: Match.objectLike({ IncludeCookies: false }),
+      }),
+    });
+    app.hasResourceProperties("AWS::S3::Bucket", {
+      LifecycleConfiguration: Match.objectLike({
+        Rules: Match.arrayWith([Match.objectLike({ ExpirationInDays: 90 })]),
+      }),
+      OwnershipControls: Match.objectLike({
+        Rules: [{ ObjectOwnership: "BucketOwnerPreferred" }],
+      }),
+    });
+  });
+
+  it("alarms on Lambda errors/throttles and API 5xx onto the security topic", () => {
+    app.hasResourceProperties("AWS::CloudWatch::Alarm", {
+      MetricName: "Errors",
+      Namespace: "AWS/Lambda",
+      Threshold: 1,
+    });
+    app.hasResourceProperties("AWS::CloudWatch::Alarm", {
+      MetricName: "Throttles",
+      Namespace: "AWS/Lambda",
+      Threshold: 1,
+    });
+    app.hasResourceProperties("AWS::CloudWatch::Alarm", {
+      MetricName: "5xx",
+      Namespace: "AWS/ApiGateway",
+      Threshold: 3,
+    });
+  });
+
+  it("probes prod availability with a canary and alarms when it fails or stops", () => {
+    app.hasResourceProperties("AWS::Synthetics::Canary", {
+      Schedule: Match.objectLike({ Expression: "rate(15 minutes)" }),
+    });
+    app.hasResourceProperties("AWS::CloudWatch::Alarm", {
+      MetricName: "SuccessPercent",
+      ComparisonOperator: "LessThanThreshold",
+      // Canary silence is blindness, not health.
+      TreatMissingData: "breaching",
+    });
+    // local skips the canary (cost/noise in dev accounts).
+    synth(localConfig).app.resourceCountIs("AWS::Synthetics::Canary", 0);
+  });
+
   it("sets HSTS + no-referrer on the API surface without frame-denying it", () => {
     // /oauth/authorize must stay iframe-able for the SDK's silent-auth flow, so
     // the API headers policy carries HSTS + Referrer-Policy but no FrameOptions.
@@ -355,6 +453,19 @@ describe("AuthCiRole", () => {
           Match.objectLike({
             Action: "sts:AssumeRole",
             Resource: "arn:aws:iam::399827112494:role/cdk-hnb659fds-*-399827112494-us-east-1",
+          }),
+        ]),
+      },
+    });
+  });
+
+  it("may read exactly the alert-email SSM parameter (pipeline-wired alerting)", () => {
+    ciRole.hasResourceProperties("AWS::IAM::Policy", {
+      PolicyDocument: {
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Action: "ssm:GetParameter",
+            Resource: Match.stringLikeRegexp("parameter/auth/alert-email$"),
           }),
         ]),
       },
