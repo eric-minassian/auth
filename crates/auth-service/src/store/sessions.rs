@@ -29,6 +29,8 @@ fn session_pk(sid_hash: &str) -> String {
 
 impl Store {
     /// Create a session; returns the plaintext sid (cookie value) exactly once.
+    /// `credential_id` is the passkey that asserted this session (`None` for
+    /// enroll sessions, which are minted without an assertion).
     pub async fn create_session(
         &self,
         user_id: Uuid,
@@ -36,6 +38,7 @@ impl Store {
         amr: Vec<String>,
         device: Option<String>,
         region: Option<String>,
+        credential_id: Option<String>,
     ) -> Result<(String, IdpSession), StoreError> {
         let sid = random_b64u(32);
         let sid_hash = sha256_b64u(&sid);
@@ -62,6 +65,7 @@ impl Store {
             },
             device,
             region,
+            credential_id,
         };
         let item = serde_dynamo::to_item(SessionItem {
             pk: session_pk(&sid_hash),
@@ -131,16 +135,24 @@ impl Store {
 
     /// Stamp a fresh step-up assertion onto an existing (live) session. Used by
     /// the WebAuthn re-auth ceremony so subsequent sensitive operations (e.g.
-    /// generating recovery codes) can require a recent assertion.
-    pub async fn set_session_reauth(&self, sid_hash: &str, ts: i64) -> Result<(), StoreError> {
+    /// generating recovery codes) can require a recent assertion. The asserting
+    /// credential becomes the session's bound credential — the session's fate
+    /// now follows the passkey that most recently vouched for it.
+    pub async fn set_session_reauth(
+        &self,
+        sid_hash: &str,
+        ts: i64,
+        credential_id: &str,
+    ) -> Result<(), StoreError> {
         self.db
             .update_item()
             .table_name(&self.table)
             .key("PK", s(session_pk(sid_hash)))
             .key("SK", s("SESSION"))
-            .update_expression("SET reauth_at = :ts")
+            .update_expression("SET reauth_at = :ts, credential_id = :cred")
             .condition_expression("attribute_exists(PK) AND absolute_expires_at > :now")
             .expression_attribute_values(":ts", n(ts))
+            .expression_attribute_values(":cred", s(credential_id.to_string()))
             .expression_attribute_values(":now", n(now()))
             .send()
             .await

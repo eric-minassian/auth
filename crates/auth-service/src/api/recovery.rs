@@ -93,6 +93,7 @@ pub async fn redeem(
             vec!["recovery".to_string()],
             super::summarize_user_agent(&headers),
             super::client_region(&headers),
+            None,
         )
         .await?;
     tracing::info!(target: "audit", event = "recovery_redeemed", user_id = %user.user_id);

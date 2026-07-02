@@ -304,6 +304,7 @@ pub async fn login_finish(
             vec!["webauthn".to_string()],
             super::summarize_user_agent(&headers),
             super::client_region(&headers),
+            Some(stored.credential_id.clone()),
         )
         .await?;
     tracing::info!(target: "audit", event = "login", user_id = %stored.user_id);
@@ -407,7 +408,7 @@ pub async fn reauth_finish(
     }
     state
         .store
-        .set_session_reauth(&session.sid_hash, now())
+        .set_session_reauth(&session.sid_hash, now(), &stored.credential_id)
         .await?;
     let mut passkey = stored.passkey.clone();
     if passkey.update_credential(&auth_result) == Some(true) {
