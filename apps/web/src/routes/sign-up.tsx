@@ -52,7 +52,8 @@ function SignUp() {
       footer={
         <>
           Already have an account?{" "}
-          <Link to="/sign-in" className="text-primary underline">
+          {/* Carry return_to so a mid-OAuth user still lands back at the RP. */}
+          <Link to="/sign-in" search={{ return_to }} className="text-primary underline">
             Sign in
           </Link>
         </>
@@ -72,7 +73,8 @@ function SignUp() {
           value={nickname}
           onChange={(e) => setNickname(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === "Enter" && nickname.trim()) void createAccount();
+            // busy gate: a second Enter must not start a parallel ceremony.
+            if (e.key === "Enter" && !busy && nickname.trim()) void createAccount();
           }}
         />
       </Field>

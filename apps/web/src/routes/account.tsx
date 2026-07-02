@@ -25,6 +25,7 @@ import {
   UserIcon,
 } from "lucide-react";
 import { useCallback } from "react";
+import { toast } from "sonner";
 
 import { OverviewPanel } from "../components/account/OverviewPanel.js";
 import { PasskeysPanel } from "../components/account/PasskeysPanel.js";
@@ -94,7 +95,14 @@ function AccountPage() {
   }, [navigate]);
 
   async function signOut() {
-    await api.post("/api/session/logout").catch(() => undefined);
+    try {
+      // A failure must stay visible: leaving the account page while the
+      // session cookie is still live would fake a sign-out.
+      await api.post("/api/session/logout");
+    } catch {
+      toast.error("Couldn't sign you out — check your connection and try again.");
+      return;
+    }
     void navigate({ to: "/sign-in" });
   }
 
@@ -203,6 +211,11 @@ export const accountRoute = createRoute({
   beforeLoad: async () => {
     try {
       const session = await api.get<SessionInfo>("/api/session");
+      // Unfinished post-recovery review outranks account management: the
+      // server refuses to authorize RPs until it's done, so route there.
+      if (session.user.pending_credential_review) {
+        throw redirect({ to: "/review-passkeys", search: {} });
+      }
       return { session };
     } catch (e) {
       // Only an auth failure means "not signed in" — bounce to sign-in. Any

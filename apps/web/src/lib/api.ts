@@ -51,7 +51,12 @@ export const api = {
 };
 
 export interface SessionInfo {
-  user: { user_id: string; nickname: string };
+  user: {
+    user_id: string;
+    nickname: string;
+    /** Set after a recovery left older passkeys the owner hasn't reviewed. */
+    pending_credential_review?: boolean | null;
+  };
   session: { created_at: number; amr: string[] };
 }
 
@@ -65,6 +70,8 @@ export interface PasskeyInfo {
   name: string;
   created_at: number;
   last_used_at: number | null;
+  /** Whether this passkey's assertion backs the current session. */
+  current: boolean;
   /** Backup-eligible (syncable passkey) hint; `null`/absent if unknown. */
   backup_eligible?: boolean | null;
   /** Backup-state (currently backed up) hint. */
