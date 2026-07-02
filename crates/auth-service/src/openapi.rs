@@ -69,6 +69,7 @@ use utoipa::OpenApi;
         crate::api::account::SessionList,
         crate::api::account::RecoveryCodes,
         crate::api::account::RecoveryReadiness,
+        crate::api::account::DeletePasskeyResponse,
         crate::oidc::token::TokenRequest,
         crate::oidc::token::TokenResponse,
     )),

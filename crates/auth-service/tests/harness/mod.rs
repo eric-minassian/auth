@@ -91,6 +91,12 @@ impl TestApp {
     /// authenticator, which supports resident keys); Rust tests use this to
     /// reach an authenticated state for the rest of the API surface.
     pub async fn login_as(&mut self, user_id: Uuid) {
+        self.login_as_with_credential(user_id, None).await;
+    }
+
+    /// Like [`Self::login_as`], but binds the session to a credential id, as a
+    /// real `login/finish` would (credential-lifecycle revocation tests).
+    pub async fn login_as_with_credential(&mut self, user_id: Uuid, credential_id: Option<String>) {
         let (sid, _session) = self
             .store
             .create_session(
@@ -99,6 +105,7 @@ impl TestApp {
                 vec!["webauthn".to_string()],
                 None,
                 None,
+                credential_id,
             )
             .await
             .expect("create full session");
