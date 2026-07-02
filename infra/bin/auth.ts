@@ -23,7 +23,12 @@ new AuthAppStack(app, "AuthApp", config, {
   env: config.env,
   hostedZone: stateful.hostedZone,
   table: stateful.table,
-  signingKey: stateful.signingKey,
+  // Active key first: flipping `activeSigningKey` in config/environments.ts
+  // is the publish-before-sign rotation switch (runbook: docs/deploy.md).
+  signingKeys:
+    config.activeSigningKey === "b"
+      ? [stateful.signingKeyB, stateful.signingKey]
+      : [stateful.signingKey, stateful.signingKeyB],
 });
 
 // The GitHub Actions deploy role only exists for the CI-deployed environments;
