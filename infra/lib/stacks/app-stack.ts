@@ -33,7 +33,8 @@ const dir = path.dirname(fileURLToPath(import.meta.url));
 export interface AuthAppStackProps extends cdk.StackProps {
   hostedZone: route53.IHostedZone;
   table: dynamodb.TableV2;
-  signingKey: kms.Key;
+  /** JWT signing keyring, active key first (publish-before-sign rotation). */
+  signingKeys: kms.Key[];
 }
 
 /**
@@ -100,14 +101,20 @@ export class AuthAppStack extends cdk.Stack {
       environment: {
         TABLE_NAME: props.table.tableName,
         ISSUER: issuerUrl(config),
-        KMS_KEY_ID: props.signingKey.keyId,
+        // Comma-separated keyring, active first; every key is published in
+        // JWKS, only the first signs (rotation runbook: docs/deploy.md).
+        KMS_KEY_IDS: props.signingKeys.map((key) => key.keyId).join(","),
         ORIGIN_VERIFY_SECRET: originVerifyValue,
         RUST_LOG: "info",
       },
       logGroup: apiLogs,
     });
     props.table.grantReadWriteData(fn);
-    props.signingKey.grant(fn, "kms:Sign", "kms:GetPublicKey");
+    // Sign+GetPublicKey on every keyring member: a rotation flip must never
+    // need an IAM change.
+    for (const key of props.signingKeys) {
+      key.grant(fn, "kms:Sign", "kms:GetPublicKey");
+    }
 
     // --- HTTP API in front of the Lambda ---
     const httpApi = new apigwv2.HttpApi(this, "HttpApi", {

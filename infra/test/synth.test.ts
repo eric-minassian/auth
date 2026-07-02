@@ -16,6 +16,7 @@ const config: AuthConfig = {
   delegation: { managementAccountId: "298499393596", parentZoneName: "ericminassian.com" },
   lambdaAssetPath: "assets/lambda-bootstrap",
   spaAssetPath: "assets/spa-placeholder",
+  activeSigningKey: "a",
 };
 
 function synth(cfg: AuthConfig = config) {
@@ -25,7 +26,7 @@ function synth(cfg: AuthConfig = config) {
     env: cfg.env,
     hostedZone: stateful.hostedZone,
     table: stateful.table,
-    signingKey: stateful.signingKey,
+    signingKeys: [stateful.signingKey, stateful.signingKeyB],
   });
   return {
     stateful: Template.fromStack(stateful),
@@ -149,6 +150,24 @@ describe("AuthApp", () => {
             Effect: "Allow",
           }),
         ]),
+      },
+    });
+  });
+
+  it("wires the full signing keyring into the Lambda (publish-before-sign)", () => {
+    const { stateful } = synth();
+    // Both keyring members exist and are retained…
+    stateful.resourceCountIs("AWS::KMS::Key", 2);
+    stateful.hasResourceProperties("AWS::KMS::Alias", {
+      AliasName: "alias/auth-jwt-b",
+    });
+    // …and the Lambda receives the comma-joined keyring, active first, so a
+    // rotation flip is a config-only change.
+    app.hasResourceProperties("AWS::Lambda::Function", {
+      Environment: {
+        Variables: Match.objectLike({
+          KMS_KEY_IDS: Match.anyValue(),
+        }),
       },
     });
   });

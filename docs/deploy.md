@@ -153,3 +153,33 @@ AWS_PROFILE=dev pnpm exec tsx scripts/seed.ts
 This serves `https://dev.auth.ericminassian.com`. (Day-to-day local development
 doesn't need a cloud deploy at all — use `pnpm dev`, which runs the stack against
 DynamoDB Local.)
+
+## Signing-key rotation (publish-before-sign)
+
+Two ES256 KMS keys are always provisioned — `alias/auth-jwt-a` and
+`alias/auth-jwt-b`. Both public keys are always served by
+`/.well-known/jwks.json`; only the **active** one signs. The active key is
+selected by `activeSigningKey` in `infra/config/environments.ts`, which orders
+`KMS_KEY_IDS` (active first) for the Lambda.
+
+To rotate (e.g. annually, or on suspicion of compromise):
+
+1. **Confirm the standby is published.** Both keys are in JWKS at all times,
+   so any verifier that has fetched JWKS in the last 10 minutes (the SDK's
+   jose cache TTL; unknown `kid`s also trigger a refetch) already has it.
+2. **Flip** `activeSigningKey` (`"a"` → `"b"`) and merge — the pipeline
+   deploys it. New tokens now carry the standby's `kid`; old tokens keep
+   verifying because the retired key stays published.
+3. **Leave both keys published.** Access tokens live 10 minutes and id_tokens
+   5, but `id_token_hint` at logout accepts expired id_tokens, so the retired
+   key must stay in JWKS until you are comfortable rejecting stale hints
+   (they fail soft — logout falls back to the confirmation page).
+4. **For a compromised key**: after the flip, ALSO disable the retired key in
+   KMS (`aws kms disable-key`) once step 2's deploy is out — verification
+   uses only the published public keys, so disabling breaks nothing except
+   the attacker's ability to sign.
+5. To replace the retired key material entirely, schedule key deletion and
+   provision a fresh standby (new CDK logical id), then repeat.
+
+An emergency rotation is therefore: flip config → merge → (optionally)
+disable the old key. No RP ever sees an unknown `kid`.

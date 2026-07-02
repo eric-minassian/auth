@@ -24,6 +24,8 @@ export class AuthStatefulStack extends cdk.Stack {
   readonly hostedZone: route53.IHostedZone;
   readonly table: dynamodb.TableV2;
   readonly signingKey: kms.Key;
+  /** Standby signing key (publish-before-sign keyring rotation). */
+  readonly signingKeyB: kms.Key;
 
   constructor(scope: Construct, id: string, config: AuthConfig, props?: cdk.StackProps) {
     super(scope, id, props);
@@ -97,8 +99,20 @@ export class AuthStatefulStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
 
+    // The standby half of the publish-before-sign keyring: always provisioned
+    // and published in JWKS, signing only after the `activeSigningKey` config
+    // flip (rotation runbook: docs/deploy.md).
+    this.signingKeyB = new kms.Key(this, "JwtSigningKeyB", {
+      keySpec: kms.KeySpec.ECC_NIST_P256,
+      keyUsage: kms.KeyUsage.SIGN_VERIFY,
+      alias: "auth-jwt-b",
+      description: "ES256 standby signing key for auth.ericminassian.com JWTs",
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+
     new cdk.CfnOutput(this, "HostedZoneId", { value: this.hostedZone.hostedZoneId });
     new cdk.CfnOutput(this, "TableName", { value: this.table.tableName });
     new cdk.CfnOutput(this, "SigningKeyId", { value: this.signingKey.keyId });
+    new cdk.CfnOutput(this, "SigningKeyBId", { value: this.signingKeyB.keyId });
   }
 }
