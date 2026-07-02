@@ -20,7 +20,9 @@ pub enum RateClass {
     RecoveryIp,
     /// Recovery-code redemption attempts per origin ASN.
     RecoveryAsn,
-    /// Failed login finishes per client IP (/64).
+    /// Login ceremony starts + finishes (success or failure) per client IP
+    /// (/64). Consumed up front, so both ceremony-row creation and assertion
+    /// guessing draw from one budget.
     LoginIp,
     /// Token endpoint per client IP (/64).
     TokenIp,
@@ -52,7 +54,10 @@ impl RateClass {
             Self::SignupAsn => (300, 3600),
             Self::RecoveryIp => (20, 3600),
             Self::RecoveryAsn => (200, 3600),
-            Self::LoginIp => (20, 3600),
+            // Start + finish each draw one token, so this allows ~60 full
+            // logins/hour from one IP — far above any legitimate use, far
+            // below a useful guessing budget.
+            Self::LoginIp => (120, 3600),
             Self::TokenIp => (60, 60),
             Self::AccountSession => (30, 3600),
             Self::ReportsIp => (120, 60),

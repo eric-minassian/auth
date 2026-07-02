@@ -110,7 +110,10 @@ pub async fn rename_passkey(
         .rename_credential(session.user_id, &credential_id, req.name.trim())
         .await
     {
-        Ok(()) => Ok(Json(json!({ "ok": true }))),
+        Ok(()) => {
+            tracing::info!(target: "audit", event = "passkey_renamed", user_id = %session.user_id, credential_id);
+            Ok(Json(json!({ "ok": true })))
+        }
         Err(StoreError::ConditionFailed) => Err(ApiError::NotFound),
         Err(e) => Err(e.into()),
     }
@@ -197,6 +200,7 @@ pub async fn delete_passkey(
         target: "audit",
         event = "passkey_deleted",
         user_id = %session.user_id,
+        credential_id,
         revoked_sessions,
         current_session_revoked,
     );
@@ -262,7 +266,7 @@ pub async fn revoke_session(
         return Err(ApiError::NotFound);
     };
     revoke_session_cascade(&state, &target).await?;
-    tracing::info!(target: "audit", event = "session_revoked", user_id = %session.user_id);
+    tracing::info!(target: "audit", event = "session_revoked", user_id = %session.user_id, target_sid = %target.sid_hash);
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -302,6 +306,15 @@ pub async fn delete_account(
         .get_user(session.user_id)
         .await?
         .ok_or(ApiError::Unauthorized)?;
+
+    // Tombstone FIRST: if the cascade below is interrupted, the account is
+    // already refused everywhere (`is_active()` gates login, authorize,
+    // refresh, and recovery) instead of being half-deleted but live — e.g.
+    // credentials gone but full sessions still standing.
+    state
+        .store
+        .set_user_status(user.user_id, crate::domain::user::AccountStatus::Deleting)
+        .await?;
 
     for credential in state.store.list_credentials(user.user_id).await? {
         state

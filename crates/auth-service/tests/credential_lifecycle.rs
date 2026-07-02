@@ -178,7 +178,8 @@ async fn deleting_a_passkey_revokes_the_sessions_and_tokens_it_established() {
         .map(|p| p["credential_id"].as_str().expect("id").to_string())
         .find(|id| *id != doomed_id)
         .expect("original credential");
-    app.login_as_with_credential(user_id, Some(original_id)).await;
+    app.login_as_with_credential(user_id, Some(original_id))
+        .await;
 
     let res = delete_passkey_req(&app, &doomed_id).await;
     res.assert_status(StatusCode::OK);
