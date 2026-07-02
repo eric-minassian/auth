@@ -544,6 +544,11 @@ export interface components {
             /** Format: int64 */
             created_at: number;
             credential_id: string;
+            /**
+             * @description Whether this passkey's assertion backs the caller's current session
+             *     (the post-recovery review screen must not offer to delete it).
+             */
+            current: boolean;
             /** Format: int64 */
             last_used_at?: number | null;
             name: string;
