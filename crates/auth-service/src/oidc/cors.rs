@@ -44,7 +44,7 @@ pub async fn allow_registered_origins(
             );
             headers.insert(
                 header::ACCESS_CONTROL_ALLOW_HEADERS,
-                HeaderValue::from_static("content-type, authorization"),
+                HeaderValue::from_static("content-type, authorization, dpop"),
             );
             headers.insert(
                 header::ACCESS_CONTROL_MAX_AGE,
@@ -102,4 +102,10 @@ fn apply_cors(response: &mut Response, origin: Option<&str>) {
     let headers = response.headers_mut();
     headers.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, value);
     headers.insert(header::VARY, HeaderValue::from_static("Origin"));
+    // The SDK must be able to read the DPoP-Nonce challenge (RFC 9449 §8)
+    // and WWW-Authenticate from cross-origin responses.
+    headers.insert(
+        header::ACCESS_CONTROL_EXPOSE_HEADERS,
+        HeaderValue::from_static("dpop-nonce, www-authenticate"),
+    );
 }
