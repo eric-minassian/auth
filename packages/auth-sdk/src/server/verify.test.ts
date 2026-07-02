@@ -122,7 +122,7 @@ describe("createAuthVerifier", () => {
       "logout+jwt",
     );
     const result = await verifier.verifyLogoutToken(logoutToken);
-    expect(result).toEqual({ sub: "user-1", sid: "sid-1" });
+    expect(result).toEqual({ sub: "user-1", sid: "sid-1", jti: "j" });
 
     const withNonce = await sign(
       {

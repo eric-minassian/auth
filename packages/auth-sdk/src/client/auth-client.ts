@@ -95,6 +95,27 @@ interface CachedToken {
 const TX_KEY = "ema_auth_tx";
 const RT_KEY = "ema_auth_rt";
 const ID_KEY = "ema_auth_id";
+
+/**
+ * A non-2xx token-endpoint response, carrying the parsed OAuth error body so
+ * callers can tell a definitive grant rejection (`invalid_grant`) from a
+ * transient failure (5xx, rate limit) that must not destroy local state.
+ */
+class TokenEndpointError extends AuthError {
+  readonly status: number;
+  readonly oauthError: string | undefined;
+
+  constructor(
+    code: ConstructorParameters<typeof AuthError>[0],
+    status: number,
+    oauthError: string | undefined,
+    message: string,
+  ) {
+    super(code, message);
+    this.status = status;
+    this.oauthError = oauthError;
+  }
+}
 // Refresh this many seconds before the access token actually expires.
 const EXPIRY_SKEW_SECONDS = 30;
 // postMessage discriminator + budget for the hidden silent-auth iframe.
@@ -179,11 +200,22 @@ export function createAuthClient(options: AuthClientOptions): AuthClient {
 
   async function exchange(body: Record<string, string>): Promise<void> {
     const { token_endpoint } = await getDiscovery();
-    const response = await tokenRequest(token_endpoint, body);
+    let response: Response;
+    try {
+      response = await tokenRequest(token_endpoint, body);
+    } catch {
+      // fetch() rejection = network failure, not a server verdict.
+      throw new AuthError("network_error", "token endpoint unreachable");
+    }
     if (!response.ok) {
-      throw new AuthError(
+      const detail = (await response.json().catch(() => undefined)) as
+        | { error?: string; error_description?: string }
+        | undefined;
+      throw new TokenEndpointError(
         body.grant_type === "refresh_token" ? "token_refresh_failed" : "invalid_grant",
-        "token endpoint rejected the request",
+        response.status,
+        detail?.error,
+        detail?.error_description ?? "token endpoint rejected the request",
       );
     }
     const tokens = (await response.json()) as {
@@ -206,8 +238,12 @@ export function createAuthClient(options: AuthClientOptions): AuthClient {
 
   // The body of a refresh, run at most once concurrently (guarded by
   // `refreshInFlight`). Reads the refresh token inside the flight so it is
-  // consumed exactly once per rotation; on failure it clears local state so the
-  // app falls back to interactive sign-in.
+  // consumed exactly once per rotation. Only a *definitive* rejection of the
+  // grant itself (400 invalid_grant: rotated away, revoked, session ended)
+  // clears local state and forces re-login — a transient failure (offline,
+  // discovery down, 5xx, rate limit) leaves the still-valid refresh token in
+  // place and surfaces a retriable error instead of silently signing the user
+  // out of every RP.
   async function refreshAccessToken(): Promise<void> {
     const refreshToken = storage.get(RT_KEY);
     if (!refreshToken) throw new AuthError("login_required", "no refresh token available");
@@ -218,13 +254,21 @@ export function createAuthClient(options: AuthClientOptions): AuthClient {
         client_id: options.clientId,
       });
     } catch (error) {
-      // Refresh failed (rotated away, revoked, session ended): force re-login.
+      const definitive =
+        error instanceof TokenEndpointError &&
+        error.status === 400 &&
+        error.oauthError === "invalid_grant";
+      if (!definitive) {
+        // Retriable: preserve state; the next getAccessToken() tries again.
+        throw error instanceof AuthError
+          ? error
+          : new AuthError("token_refresh_failed", "token refresh failed");
+      }
       storage.remove(RT_KEY);
       storage.remove(ID_KEY);
       cachedToken = undefined;
       setState({ status: "unauthenticated" });
-      if (error instanceof AuthError) throw new AuthError("login_required", error.message);
-      throw new AuthError("login_required");
+      throw new AuthError("login_required", error.message);
     }
   }
 
@@ -452,20 +496,28 @@ export function createAuthClient(options: AuthClientOptions): AuthClient {
     async signOut(signOutOptions): Promise<void> {
       const idToken = storage.get(ID_KEY);
       const refreshToken = storage.get(RT_KEY);
-      const { end_session_endpoint, revocation_endpoint } = await getDiscovery();
-      if (refreshToken) {
-        await fetch(revocation_endpoint, {
-          method: "POST",
-          headers: { "content-type": "application/x-www-form-urlencoded" },
-          body: new URLSearchParams({ token: refreshToken }),
-        }).catch(() => undefined);
-      }
+      // Local state goes first: sign-out must take effect even when the
+      // network or discovery is down. Everything after is best-effort.
       storage.remove(RT_KEY);
       storage.remove(ID_KEY);
       cachedToken = undefined;
       setState({ status: "unauthenticated" });
 
-      const url = new URL(end_session_endpoint);
+      let endpoints: Discovery;
+      try {
+        endpoints = await getDiscovery();
+      } catch {
+        return; // offline: locally signed out; the IdP session is untouched
+      }
+      if (refreshToken) {
+        await fetch(endpoints.revocation_endpoint, {
+          method: "POST",
+          headers: { "content-type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams({ token: refreshToken }),
+        }).catch(() => undefined);
+      }
+
+      const url = new URL(endpoints.end_session_endpoint);
       const search = new URLSearchParams();
       if (idToken) search.set("id_token_hint", idToken);
       search.set("client_id", options.clientId);

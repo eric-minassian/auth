@@ -11,4 +11,9 @@ export {
   type DpopProofInput,
   type StepUpChallengeOptions,
 } from "./verify.js";
+export {
+  createLogoutReceiver,
+  inMemoryReplayCache,
+  type LogoutReceiverOptions,
+} from "./backchannel.js";
 export { AuthError, type AuthErrorCode } from "../index.js";

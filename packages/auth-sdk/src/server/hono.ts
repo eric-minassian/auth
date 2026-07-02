@@ -1,5 +1,6 @@
-import type { Context, MiddlewareHandler } from "hono";
+import type { Context, Handler, MiddlewareHandler } from "hono";
 
+import { createLogoutReceiver, type LogoutReceiverOptions } from "./backchannel.js";
 import type { AccessTokenClaims, AuthVerifier } from "./verify.js";
 
 declare module "hono" {
@@ -26,4 +27,23 @@ export function authMiddleware(verifier: AuthVerifier): MiddlewareHandler {
     c.set("auth", result.claims);
     await next();
   };
+}
+
+/**
+ * Hono handler for the RP's registered `backchannel_logout_uri`. `c.req.raw`
+ * is a real `Request`, so the receiver consumes it directly.
+ *
+ * ```ts
+ * app.post("/auth/backchannel-logout", logoutReceiver(verifier, {
+ *   onLogout: ({ sid }) => sessions.deleteByIdpSid(sid),
+ *   isReplay: inMemoryReplayCache(),
+ * }));
+ * ```
+ */
+export function logoutReceiver(
+  verifier: AuthVerifier,
+  options: LogoutReceiverOptions,
+): Handler {
+  const receive = createLogoutReceiver(verifier, options);
+  return (c: Context) => receive(c.req.raw);
 }
