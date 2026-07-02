@@ -67,6 +67,13 @@ pub struct IdpSession {
     /// not IP, to keep the anti-fingerprinting/privacy posture.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub region: Option<String>,
+    /// The credential (base64url id) whose assertion established — or most
+    /// recently stepped up — this session. `None` for enroll sessions (no
+    /// assertion yet) and for sessions minted before this field existed.
+    /// Deleting a passkey revokes every session bound to it (CAEP
+    /// credential-change semantics, applied locally).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_id: Option<String>,
 }
 
 impl IdpSession {
@@ -133,6 +140,7 @@ mod tests {
             reauth_at,
             device: None,
             region: None,
+            credential_id: None,
         }
     }
 

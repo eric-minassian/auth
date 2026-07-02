@@ -14,6 +14,7 @@ use crate::domain::user::User;
 use crate::jwt::claims::{
     ACCESS_TOKEN_TTL_SECS, AccessTokenClaims, Cnf, ID_TOKEN_TTL_SECS, IdTokenClaims,
 };
+use crate::session::logout::revoke_session_cascade;
 use crate::state::AppState;
 use crate::store::now;
 use crate::store::oauth::{CodeConsume, RotateOutcome, decode_refresh_token};
@@ -285,6 +286,22 @@ async fn refresh(
                 ip = %abuse.ip,
                 asn = abuse.asn.as_deref(),
             );
+            // Reuse is a compromise signal (RFC 9700): the family is already
+            // revoked; also revoke the IdP session behind it — cascading to
+            // its sibling refresh families and back-channel logout — so
+            // nothing minted from the same login survives, and the user sees
+            // a fresh sign-in instead of a silently broken RP.
+            if let Some(session) = state.store.get_session_by_hash(&family.sid_hash).await? {
+                revoke_session_cascade(state, &session)
+                    .await
+                    .map_err(OAuthError::from)?;
+                tracing::warn!(
+                    target: "audit",
+                    event = "session_revoked_on_refresh_reuse",
+                    user_id = %family.user_id,
+                    family_id = %family.family_id,
+                );
+            }
             return Err(OAuthError::invalid_grant());
         }
         RotateOutcome::Invalid => return Err(OAuthError::invalid_grant()),

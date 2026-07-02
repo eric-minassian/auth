@@ -116,25 +116,48 @@ pub async fn rename_passkey(
     }
 }
 
+#[derive(Serialize, ToSchema)]
+pub struct DeletePasskeyResponse {
+    pub ok: bool,
+    /// Whether the caller's own session was bound to the deleted passkey and
+    /// has therefore been revoked (the SPA should route back to sign-in).
+    pub current_session_revoked: bool,
+}
+
 /// DELETE /api/account/passkeys/{credential_id} — refuses to delete the last
 /// passkey (account lockout guard; recovery would be the only way back in).
+///
+/// Requires a recent WebAuthn step-up: a stolen bearer session must not be able
+/// to strip the account down to a single attacker-controlled factor. Deleting a
+/// passkey also revokes every session bound to it (CAEP credential-change
+/// semantics, applied locally) — each cascading to its refresh families and
+/// back-channel logout — so removing a lost or compromised passkey actually
+/// severs the access it minted, including the caller's own session when it was
+/// established by that passkey.
 #[utoipa::path(
     delete,
     path = "/api/account/passkeys/{credential_id}",
     tag = "account",
     params(("credential_id" = String, Path, description = "base64url credential id")),
     responses(
-        (status = 200, body = super::OkResponse),
+        (status = 200, body = DeletePasskeyResponse),
         (status = 404, body = super::ErrorResponse),
-        (status = 409, body = super::ErrorResponse, description = "Cannot delete the only passkey"),
+        (status = 409, body = super::ErrorResponse, description = "Cannot delete the only passkey, or step-up re-authentication required"),
     ),
 )]
 pub async fn delete_passkey(
     State(state): State<AppState>,
     FullSession(session): FullSession,
+    jar: axum_extra::extract::CookieJar,
     Path(credential_id): Path<String>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<(axum_extra::extract::CookieJar, Json<Value>), ApiError> {
     rate_limit_account(&state, &session.sid_hash).await?;
+    if crate::store::now() - session.reauth_at > REAUTH_FRESHNESS_SECS {
+        return Err(ApiError::Conflict {
+            code: "reauth_required",
+            message: "re-authenticate with a passkey before removing one".to_string(),
+        });
+    }
     let credentials = state.store.list_credentials(session.user_id).await?;
     if credentials.len() <= 1 {
         return Err(ApiError::Conflict {
@@ -150,13 +173,43 @@ pub async fn delete_passkey(
         .delete_credential(session.user_id, &credential_id)
         .await
     {
-        Ok(()) => {
-            tracing::info!(target: "audit", event = "passkey_deleted", user_id = %session.user_id);
-            Ok(Json(json!({ "ok": true })))
-        }
-        Err(StoreError::ConditionFailed) => Err(ApiError::NotFound),
-        Err(e) => Err(e.into()),
+        Ok(()) => {}
+        Err(StoreError::ConditionFailed) => return Err(ApiError::NotFound),
+        Err(e) => return Err(e.into()),
     }
+
+    // Sever everything the deleted passkey vouched for: every session it
+    // established (or most recently stepped up) dies, cascading to refresh
+    // families and back-channel logout. Pre-binding sessions (credential_id
+    // absent) can't be attributed and are left alone.
+    let mut revoked_sessions = 0u32;
+    let mut current_session_revoked = false;
+    for s in state.store.list_sessions(session.user_id).await? {
+        if s.credential_id.as_deref() == Some(credential_id.as_str()) {
+            revoke_session_cascade(&state, &s).await?;
+            revoked_sessions += 1;
+            if s.sid_hash == session.sid_hash {
+                current_session_revoked = true;
+            }
+        }
+    }
+    tracing::info!(
+        target: "audit",
+        event = "passkey_deleted",
+        user_id = %session.user_id,
+        revoked_sessions,
+        current_session_revoked,
+    );
+
+    let jar = if current_session_revoked {
+        jar.add(crate::session::clear_session_cookie(&state.cfg))
+    } else {
+        jar
+    };
+    Ok((
+        jar,
+        Json(json!({ "ok": true, "current_session_revoked": current_session_revoked })),
+    ))
 }
 
 /// GET /api/account/sessions

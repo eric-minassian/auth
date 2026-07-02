@@ -88,6 +88,7 @@
           "account"
         ],
         "summary": "DELETE /api/account/passkeys/{credential_id} — refuses to delete the last\npasskey (account lockout guard; recovery would be the only way back in).",
+        "description": "Requires a recent WebAuthn step-up: a stolen bearer session must not be able\nto strip the account down to a single attacker-controlled factor. Deleting a\npasskey also revokes every session bound to it (CAEP credential-change\nsemantics, applied locally) — each cascading to its refresh families and\nback-channel logout — so removing a lost or compromised passkey actually\nsevers the access it minted, including the caller's own session when it was\nestablished by that passkey.",
         "operationId": "delete_passkey",
         "parameters": [
           {
@@ -106,7 +107,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/OkResponse"
+                  "$ref": "#/components/schemas/DeletePasskeyResponse"
                 }
               }
             }
@@ -122,7 +123,7 @@
             }
           },
           "409": {
-            "description": "Cannot delete the only passkey",
+            "description": "Cannot delete the only passkey, or step-up re-authentication required",
             "content": {
               "application/json": {
                 "schema": {
@@ -762,6 +763,22 @@
   },
   "components": {
     "schemas": {
+      "DeletePasskeyResponse": {
+        "type": "object",
+        "required": [
+          "ok",
+          "current_session_revoked"
+        ],
+        "properties": {
+          "current_session_revoked": {
+            "type": "boolean",
+            "description": "Whether the caller's own session was bound to the deleted passkey and\nhas therefore been revoked (the SPA should route back to sign-in)."
+          },
+          "ok": {
+            "type": "boolean"
+          }
+        }
+      },
       "ErrorResponse": {
         "type": "object",
         "description": "Error envelope returned by every `/api/*` failure.",

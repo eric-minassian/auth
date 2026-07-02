@@ -60,6 +60,13 @@ export interface paths {
         /**
          * DELETE /api/account/passkeys/{credential_id} — refuses to delete the last
          *     passkey (account lockout guard; recovery would be the only way back in).
+         * @description Requires a recent WebAuthn step-up: a stolen bearer session must not be able
+         *     to strip the account down to a single attacker-controlled factor. Deleting a
+         *     passkey also revokes every session bound to it (CAEP credential-change
+         *     semantics, applied locally) — each cascading to its refresh families and
+         *     back-channel logout — so removing a lost or compromised passkey actually
+         *     severs the access it minted, including the caller's own session when it was
+         *     established by that passkey.
          */
         delete: operations["delete_passkey"];
         options?: never;
@@ -441,6 +448,14 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        DeletePasskeyResponse: {
+            /**
+             * @description Whether the caller's own session was bound to the deleted passkey and
+             *     has therefore been revoked (the SPA should route back to sign-in).
+             */
+            current_session_revoked: boolean;
+            ok: boolean;
+        };
         /** @description Error envelope returned by every `/api/*` failure. */
         ErrorResponse: {
             /** @description Machine-readable error code, e.g. `rate_limited`, `account_exists`. */
@@ -661,7 +676,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["OkResponse"];
+                    "application/json": components["schemas"]["DeletePasskeyResponse"];
                 };
             };
             404: {
@@ -672,7 +687,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description Cannot delete the only passkey */
+            /** @description Cannot delete the only passkey, or step-up re-authentication required */
             409: {
                 headers: {
                     [name: string]: unknown;
