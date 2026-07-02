@@ -90,7 +90,7 @@ export interface AuthVerifier {
    */
   authenticateRequest(request: Request): Promise<AuthResult>;
   /** Verify a back-channel logout token (for an RP's logout receiver). */
-  verifyLogoutToken(token: string): Promise<{ sub?: string; sid?: string }>;
+  verifyLogoutToken(token: string): Promise<{ sub?: string; sid?: string; jti?: string }>;
 }
 
 const DEFAULT_PROOF_MAX_AGE = 300;
@@ -198,7 +198,7 @@ export function createAuthVerifier(options: VerifierOptions): AuthVerifier {
     verifyAccessToken,
     authenticateRequest,
 
-    async verifyLogoutToken(token): Promise<{ sub?: string; sid?: string }> {
+    async verifyLogoutToken(token): Promise<{ sub?: string; sid?: string; jti?: string }> {
       try {
         const { payload } = await jwtVerify(token, jwks, {
           issuer,
@@ -216,9 +216,10 @@ export function createAuthVerifier(options: VerifierOptions): AuthVerifier {
         if ("nonce" in payload) {
           throw new AuthError("invalid_token", "logout token must not contain a nonce");
         }
-        const result: { sub?: string; sid?: string } = {};
+        const result: { sub?: string; sid?: string; jti?: string } = {};
         if (typeof payload.sub === "string") result.sub = payload.sub;
         if (typeof payload["sid"] === "string") result.sid = payload["sid"] as string;
+        if (typeof payload.jti === "string") result.jti = payload.jti;
         // Spec MUST: a logout token identifies a subject, a session, or both.
         if (result.sub === undefined && result.sid === undefined) {
           throw new AuthError("invalid_token", "logout token has neither sub nor sid");

@@ -1,5 +1,6 @@
 import type { NextFunction, Request, RequestHandler, Response } from "express";
 
+import { createLogoutReceiver, type LogoutReceiverOptions } from "./backchannel.js";
 import type { AccessTokenClaims, AuthVerifier } from "./verify.js";
 
 declare global {
@@ -45,4 +46,56 @@ export function requireAuth(verifier: AuthVerifier): RequestHandler {
       })
       .catch(next);
   };
+}
+
+/**
+ * Express handler for the RP's registered `backchannel_logout_uri`. Mount it
+ * directly — it reads the raw form body itself, so no body parser is needed
+ * (and an urlencoded parser upstream is fine too: the parsed body is used when
+ * present).
+ *
+ * ```ts
+ * app.post("/auth/backchannel-logout", logoutReceiver(verifier, {
+ *   onLogout: ({ sid }) => sessions.deleteByIdpSid(sid),
+ *   isReplay: inMemoryReplayCache(),
+ * }));
+ * ```
+ */
+export function logoutReceiver(
+  verifier: AuthVerifier,
+  options: LogoutReceiverOptions,
+): RequestHandler {
+  const receive = createLogoutReceiver(verifier, options);
+  return (req: Request, res: Response, next: NextFunction): void => {
+    readBody(req)
+      .then((body) => {
+        const request = new Request("http://receiver.local/backchannel-logout", {
+          method: req.method,
+          headers: { "content-type": "application/x-www-form-urlencoded" },
+          body,
+        });
+        return receive(request);
+      })
+      .then(async (response) => {
+        response.headers.forEach((value, key) => res.setHeader(key, value));
+        res.status(response.status).send(await response.text());
+      })
+      .catch(next);
+  };
+}
+
+/** The raw request body — from an upstream body parser when present, else the stream. */
+function readBody(req: Request): Promise<string> {
+  const parsed = (req as { body?: unknown }).body;
+  if (typeof parsed === "string") return Promise.resolve(parsed);
+  if (parsed && typeof parsed === "object") {
+    return Promise.resolve(new URLSearchParams(parsed as Record<string, string>).toString());
+  }
+  return new Promise((resolve, reject) => {
+    let data = "";
+    req.setEncoding("utf8");
+    req.on("data", (chunk: string) => (data += chunk));
+    req.on("end", () => resolve(data));
+    req.on("error", reject);
+  });
 }
