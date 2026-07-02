@@ -74,7 +74,18 @@ export function PasskeysPanel(props: { passkeys: PasskeyInfo[]; session: Session
   function remove(id: string) {
     void m.run(
       `delete:${id}`,
-      () => api.del(`/api/account/passkeys/${encodeURIComponent(id)}`),
+      async () => {
+        const result = await withStepUp(() =>
+          api.del<{ ok: boolean; current_session_revoked: boolean }>(
+            `/api/account/passkeys/${encodeURIComponent(id)}`,
+          ),
+        );
+        // Deleting the passkey that signed this session in revokes the
+        // session too — land on sign-in instead of a wall of 401s.
+        if (result.current_session_revoked) {
+          window.location.assign("/sign-in");
+        }
+      },
       { success: "Passkey removed", error: "Could not remove passkey" },
     );
   }
@@ -162,7 +173,7 @@ export function PasskeysPanel(props: { passkeys: PasskeyInfo[]; session: Session
                   ) : (
                     <ConfirmDelete
                       title="Remove this passkey?"
-                      description="You won't be able to sign in with this device anymore."
+                      description="You won't be able to sign in with this device anymore, and any sessions it signed in will be signed out."
                       confirmLabel="Remove"
                       onConfirm={() => remove(passkey.credential_id)}
                       trigger={

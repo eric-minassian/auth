@@ -14,6 +14,7 @@ use crate::domain::user::User;
 use crate::jwt::claims::{
     ACCESS_TOKEN_TTL_SECS, AccessTokenClaims, Cnf, ID_TOKEN_TTL_SECS, IdTokenClaims,
 };
+use crate::session::logout::revoke_session_cascade;
 use crate::state::AppState;
 use crate::store::now;
 use crate::store::oauth::{CodeConsume, RotateOutcome, decode_refresh_token};
@@ -68,6 +69,7 @@ pub async fn token(
         return Err(OAuthError {
             error: "slow_down",
             description: "rate limited",
+            dpop_nonce: None,
         });
     }
 
@@ -110,6 +112,7 @@ fn invalid_dpop(description: &'static str) -> OAuthError {
     OAuthError {
         error: "invalid_dpop_proof",
         description,
+        dpop_nonce: None,
     }
 }
 
@@ -132,8 +135,23 @@ async fn dpop_binding(
     let proof = first
         .to_str()
         .map_err(|_| invalid_dpop("malformed DPoP header"))?;
-    let verified = dpop::verify_proof(proof, "POST", htu, None, now())
+    let ts = now();
+    let verified = dpop::verify_proof(proof, "POST", htu, None, ts)
         .map_err(|_| invalid_dpop("invalid DPoP proof"))?;
+    // RFC 9449 §8: the proof must echo a fresh server nonce, so proofs can't
+    // be pre-minted long in advance of use. Challenged clients (the SDK, and
+    // any conformant DPoP client) retry once with the nonce echoed. Checked
+    // before the jti write so a challenge costs no storage.
+    let nonce_key = state.dpop_nonce_key().await?;
+    if !verified
+        .nonce
+        .as_deref()
+        .is_some_and(|n| dpop::nonce_is_valid(&nonce_key, n, ts))
+    {
+        return Err(OAuthError::use_dpop_nonce(dpop::current_nonce(
+            &nonce_key, ts,
+        )));
+    }
     // One-time-use: reject a replayed proof.
     if !state
         .store
@@ -285,6 +303,22 @@ async fn refresh(
                 ip = %abuse.ip,
                 asn = abuse.asn.as_deref(),
             );
+            // Reuse is a compromise signal (RFC 9700): the family is already
+            // revoked; also revoke the IdP session behind it — cascading to
+            // its sibling refresh families and back-channel logout — so
+            // nothing minted from the same login survives, and the user sees
+            // a fresh sign-in instead of a silently broken RP.
+            if let Some(session) = state.store.get_session_by_hash(&family.sid_hash).await? {
+                revoke_session_cascade(state, &session)
+                    .await
+                    .map_err(OAuthError::from)?;
+                tracing::warn!(
+                    target: "audit",
+                    event = "session_revoked_on_refresh_reuse",
+                    user_id = %family.user_id,
+                    family_id = %family.family_id,
+                );
+            }
             return Err(OAuthError::invalid_grant());
         }
         RotateOutcome::Invalid => return Err(OAuthError::invalid_grant()),
