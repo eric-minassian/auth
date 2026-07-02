@@ -84,6 +84,9 @@ impl IntoResponse for OAuthError {
         let status = match self.error {
             "invalid_client" => StatusCode::UNAUTHORIZED,
             "server_error" => StatusCode::INTERNAL_SERVER_ERROR,
+            // Rate limiting is an HTTP-level condition, not an OAuth grant
+            // error — 429 lets clients back off generically.
+            "slow_down" => StatusCode::TOO_MANY_REQUESTS,
             _ => StatusCode::BAD_REQUEST,
         };
         let mut response = (
@@ -116,19 +119,38 @@ impl From<crate::jwt::SignError> for OAuthError {
 }
 
 /// Verify a JWS this service issued (userinfo bearer tokens, id_token_hint).
-/// Returns the raw claims after checking signature, exp, and issuer; None on
+/// Returns the raw claims after checking signature, `typ`, and issuer; None on
 /// any failure (callers respond uniformly).
+///
+/// `expected_typ` pins the token class: without it an access token
+/// (`at+jwt`) would pass wherever an id_token is expected, and vice versa —
+/// same key, same issuer, different authority. `allow_expired` exists for
+/// `id_token_hint` at RP-initiated logout, where the hint is routinely
+/// presented after the id_token's 5-minute lifetime (OIDC RP-Initiated
+/// Logout §2: expired hints SHOULD still be accepted for identifying the
+/// session); signature and issuer are still enforced.
 pub fn verify_own_jws(
     signer: &crate::jwt::Signer,
     issuer: &str,
     token: &str,
+    expected_typ: &str,
+    allow_expired: bool,
 ) -> Option<serde_json::Value> {
+    let header = jsonwebtoken::decode_header(token).ok()?;
+    // RFC 7515 §4.1.9: typ comparisons are case-insensitive, and bare values
+    // are equivalent to their application/-prefixed form.
+    let typ = header.typ.as_deref()?;
+    let typ = typ.strip_prefix("application/").unwrap_or(typ);
+    if !typ.eq_ignore_ascii_case(expected_typ) {
+        return None;
+    }
     let jwk: jsonwebtoken::jwk::Jwk = serde_json::from_value(signer.public_jwk()).ok()?;
     let key = jsonwebtoken::DecodingKey::from_jwk(&jwk).ok()?;
     let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::ES256);
     validation.set_issuer(&[issuer]);
     // aud varies per registered client; callers check it where it matters.
     validation.validate_aud = false;
+    validation.validate_exp = !allow_expired;
     let claims =
         jsonwebtoken::decode::<serde_json::Value>(token, &key, &validation).map(|data| data.claims);
     match claims {

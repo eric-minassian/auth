@@ -85,6 +85,29 @@ impl Store {
         }
     }
 
+    /// Flip the account status. Used to tombstone (`Deleting`) an account
+    /// before its deletion cascade so an interrupted cascade fails safe.
+    pub async fn set_user_status(
+        &self,
+        user_id: Uuid,
+        status: AccountStatus,
+    ) -> Result<(), StoreError> {
+        self.db
+            .update_item()
+            .table_name(&self.table)
+            .key("PK", s(user_pk(user_id)))
+            .key("SK", s("PROFILE"))
+            .update_expression("SET #status = :status, updated_at = :now")
+            .condition_expression("attribute_exists(PK)")
+            .expression_attribute_names("#status", "status")
+            .expression_attribute_values(":status", s(status.as_str().to_string()))
+            .expression_attribute_values(":now", super::n(now()))
+            .send()
+            .await
+            .map_err(map_sdk_err)?;
+        Ok(())
+    }
+
     /// Permanently delete the user profile. Callers handle dependent items
     /// (credentials, sessions, refresh families, recovery codes) — see
     /// [`crate::api::account::delete_account`].

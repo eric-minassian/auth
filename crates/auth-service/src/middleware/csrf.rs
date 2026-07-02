@@ -26,6 +26,12 @@ pub async fn enforce(State(state): State<AppState>, req: Request, next: Next) ->
     if safe_method || !path.starts_with("/api/") || csrf_exempt || allowed(req.headers(), &state) {
         next.run(req).await
     } else {
+        let origin = req
+            .headers()
+            .get("origin")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("<none>");
+        tracing::warn!(target: "audit", event = "csrf_rejected", path, origin);
         (
             StatusCode::FORBIDDEN,
             Json(json!({ "error": "csrf", "message": "cross-origin request rejected" })),

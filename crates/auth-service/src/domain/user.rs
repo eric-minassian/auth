@@ -4,13 +4,28 @@ use uuid::Uuid;
 /// Account lifecycle. A `Pending` row exists only between `signup/start` and
 /// `signup/finish` (short TTL); it flips to `Active` atomically with the first
 /// passkey. Only `Active` accounts may authenticate or authorize RPs — this is
-/// the authoritative gate, re-checked on every read of a user.
+/// the authoritative gate, re-checked on every read of a user. `Deleting` is
+/// the tombstone written before account deletion cascades: if the cascade is
+/// interrupted, the account is already unusable rather than half-deleted but
+/// live.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum AccountStatus {
     Pending,
     #[default]
     Active,
+    Deleting,
+}
+
+impl AccountStatus {
+    /// The wire/storage form (matches the serde `snake_case` renaming).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Active => "active",
+            Self::Deleting => "deleting",
+        }
+    }
 }
 
 /// A user account. There is no email or other verified identifier: identity is

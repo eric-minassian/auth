@@ -1,7 +1,8 @@
+use axum::Form;
 use axum::extract::{OriginalUri, Query, State};
 use axum::response::Redirect;
 use axum_extra::extract::CookieJar;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::domain::oauth::{OidcClient, SCOPE_OPENID, granted_scopes, scope_contains};
@@ -10,27 +11,38 @@ use crate::state::AppState;
 use crate::store::now;
 use crate::store::oauth::AuthCodeData;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct AuthorizeQuery {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub response_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub client_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub redirect_uri: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub nonce: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub code_challenge: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub code_challenge_method: Option<String>,
     /// Space-delimited OIDC `prompt` values. We act on `none`, `login`, and
     /// `create`; other standard values (`consent`, `select_account`) are
     /// ignored (no consent screen, single subject).
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
     /// OIDC `max_age` (seconds). Kept as a string so a non-numeric value is
     /// ignored rather than failing query extraction before redirect_uri is
     /// validated.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub max_age: Option<String>,
     /// OIDC `acr_values`: space-delimited Authentication Context Class
     /// References the RP will accept, in preference order. Drives RFC 9470
     /// step-up — `phr-stepup` forces a fresh user-verified assertion.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub acr_values: Option<String>,
 }
 
@@ -49,6 +61,37 @@ pub async fn authorize(
     OriginalUri(original_uri): OriginalUri,
     jar: CookieJar,
     Query(query): Query<AuthorizeQuery>,
+) -> Redirect {
+    // Relative path+query only: behind API Gateway the reconstructed URI
+    // carries the internal execute-api host, which the SPA's same-origin
+    // return_to guard rejects.
+    let return_to = original_uri
+        .path_and_query()
+        .map(|pq| pq.as_str().to_string())
+        .unwrap_or_else(|| "/oauth/authorize".to_string());
+    authorize_impl(state, jar, query, return_to).await
+}
+
+/// POST /oauth/authorize — same endpoint, form-encoded body (OIDC Core
+/// §3.1.2.1 requires supporting both methods). The sign-in hop can only
+/// return to a URL, so the parameters are re-serialized into the GET form.
+pub async fn authorize_post(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Form(query): Form<AuthorizeQuery>,
+) -> Redirect {
+    let return_to = match serde_urlencoded::to_string(&query) {
+        Ok(qs) if !qs.is_empty() => format!("/oauth/authorize?{qs}"),
+        _ => "/oauth/authorize".to_string(),
+    };
+    authorize_impl(state, jar, query, return_to).await
+}
+
+async fn authorize_impl(
+    state: AppState,
+    jar: CookieJar,
+    query: AuthorizeQuery,
+    return_to: String,
 ) -> Redirect {
     let issuer = &state.cfg.issuer;
     let fatal = |error: &str| Redirect::to(&format!("{issuer}/error?error={}", urlencoding(error)));
@@ -198,18 +241,13 @@ pub async fn authorize(
             // Can't actively re-authenticate without UI.
             return rp_error("login_required");
         }
-        // Send the browser to the sign-in (or signup) UI, which returns to this
-        // exact authorize URL afterwards. Use the relative path+query only:
-        // behind API Gateway the reconstructed URI carries the internal
-        // execute-api host, which the SPA's same-origin return_to guard rejects.
-        let return_to = original_uri
-            .path_and_query()
-            .map(|pq| pq.as_str())
-            .unwrap_or("/oauth/authorize");
+        // Send the browser to the sign-in (or signup) UI, which returns to
+        // this exact authorize request afterwards (for a POST request, the
+        // parameters re-serialized as the equivalent GET).
         let entry = if want_create { "sign-up" } else { "sign-in" };
         return Redirect::to(&format!(
             "{issuer}/{entry}?return_to={}",
-            urlencoding(return_to)
+            urlencoding(&return_to)
         ));
     };
 

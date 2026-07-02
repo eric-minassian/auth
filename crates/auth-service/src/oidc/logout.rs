@@ -31,11 +31,15 @@ pub async fn logout(
     let issuer = &state.cfg.issuer;
     let confirm = || Redirect::to(&format!("{issuer}/logout"));
 
-    // The hint must be one of our own tokens.
+    // The hint must be one of our own *id_tokens* (typ "JWT" — an access or
+    // logout token must not stand in for one). Expired hints are accepted:
+    // an RP logging out routinely holds an id_token older than its 5-minute
+    // lifetime, and the hint only identifies the session — the cookie plus
+    // the sub match below are what authorize the action.
     let Some(hint) = query.id_token_hint.as_deref() else {
         return (jar, confirm());
     };
-    let Some(claims) = verify_own_jws(&state.signer, issuer, hint) else {
+    let Some(claims) = verify_own_jws(&state.signer, issuer, hint, "JWT", true) else {
         return (jar, confirm());
     };
     let token_client_id = claims["aud"].as_str().map(str::to_string);
