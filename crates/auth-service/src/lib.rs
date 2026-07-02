@@ -112,7 +112,10 @@ pub fn build_router(state: AppState) -> Router {
         .layer(axum_middleware::from_fn(oidc::cors::allow_public));
 
     router = router
-        .route("/oauth/authorize", get(oidc::authorize::authorize))
+        .route(
+            "/oauth/authorize",
+            get(oidc::authorize::authorize).post(oidc::authorize::authorize_post),
+        )
         .route("/oauth/logout", get(oidc::logout::logout))
         .merge(metadata)
         .merge(oauth);

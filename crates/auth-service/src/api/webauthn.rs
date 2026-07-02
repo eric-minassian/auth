@@ -177,7 +177,15 @@ pub struct LoginStartResponse {
 )]
 pub async fn login_start(
     State(state): State<AppState>,
+    headers: HeaderMap,
 ) -> Result<Json<LoginStartResponse>, ApiError> {
+    // Unauthenticated and writes a ceremony row per call — must share the
+    // login budget or it becomes a free DynamoDB-write amplifier.
+    let ip = rate_ip_key(&headers);
+    if !state.store.rate_allow(RateClass::LoginIp, &ip).await? {
+        tracing::warn!(target: "audit", event = "rate_limited", class = "login-ip", endpoint = "login_start", ip = %ip);
+        return Err(ApiError::RateLimited);
+    }
     let (options, auth_state) = state
         .webauthn
         .start_discoverable_authentication()
@@ -224,11 +232,25 @@ pub async fn login_finish(
     let ip = rate_ip_key(&headers);
     let uniform = || ApiError::Unauthorized;
 
-    let (_, ceremony_state): (Option<Uuid>, DiscoverableAuthentication) = state
+    // The whole finish path — including the ceremony-expired early return —
+    // burns login budget, so assertion guessing can't probe for free. Checked
+    // up front rather than on failure only: the previous shape counted
+    // failures but never *consulted* the budget, making the limiter a no-op.
+    if !state.store.rate_allow(RateClass::LoginIp, &ip).await? {
+        tracing::warn!(target: "audit", event = "rate_limited", class = "login-ip", endpoint = "login_finish", ip = %ip);
+        return Err(ApiError::RateLimited);
+    }
+
+    let ceremony: Option<(Option<Uuid>, DiscoverableAuthentication)> = state
         .store
         .consume_ceremony(&req.ceremony_id, CeremonyPurpose::Login)
-        .await?
-        .ok_or_else(|| ApiError::BadRequest("ceremony expired — try again".to_string()))?;
+        .await?;
+    let Some((_, ceremony_state)) = ceremony else {
+        tracing::info!(target: "audit", event = "login_failed", reason = "ceremony_expired", ip = %ip, asn = client_asn(&headers).as_deref());
+        return Err(ApiError::BadRequest(
+            "ceremony expired — try again".to_string(),
+        ));
+    };
 
     let result = async {
         // Identify by the credential id in the assertion; userHandle is
@@ -275,9 +297,7 @@ pub async fn login_finish(
     let (stored, auth_result) = match result {
         Ok(ok) => ok,
         Err(e) => {
-            // Count failures against the IP so assertion-guessing burns the
-            // login budget; result deliberately uniform.
-            let _ = state.store.rate_allow(RateClass::LoginIp, &ip).await;
+            // Budget already consumed up front; result deliberately uniform.
             tracing::info!(target: "audit", event = "login_failed", ip = %ip, asn = client_asn(&headers).as_deref());
             return Err(e);
         }
@@ -390,21 +410,25 @@ pub async fn reauth_finish(
     if owner != Some(session.user_id) {
         return Err(ApiError::Forbidden);
     }
+    let reauth_failed = || {
+        tracing::info!(target: "audit", event = "reauth_failed", user_id = %session.user_id);
+        ApiError::Unauthorized
+    };
     let auth_result = state
         .webauthn
         .finish_passkey_authentication(&req.credential, &auth_state)
-        .map_err(|_| ApiError::Unauthorized)?;
+        .map_err(|_| reauth_failed())?;
     if !auth_result.user_verified() {
-        return Err(ApiError::Unauthorized);
+        return Err(reauth_failed());
     }
     // The asserted credential must belong to this user.
     let stored = state
         .store
         .get_credential(&b64u(&req.credential.raw_id))
         .await?
-        .ok_or(ApiError::Unauthorized)?;
+        .ok_or_else(reauth_failed)?;
     if stored.user_id != session.user_id {
-        return Err(ApiError::Unauthorized);
+        return Err(reauth_failed());
     }
     state
         .store

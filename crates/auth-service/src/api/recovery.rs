@@ -60,8 +60,13 @@ pub async fn redeem(
     }
 
     // Uniform error for every failure mode (bad format / unknown / expired /
-    // owner gone) — callers must not be able to distinguish them.
-    let invalid = || ApiError::BadRequest("invalid or expired code".to_string());
+    // owner gone) — callers must not be able to distinguish them. Failures
+    // ARE audited: with no notification channel, the operator-side trail is
+    // the only way a code-guessing campaign becomes visible.
+    let invalid = || {
+        tracing::warn!(target: "audit", event = "recovery_redeem_failed", ip = %rate_ip_key(&headers), asn = client_asn(&headers).as_deref());
+        ApiError::BadRequest("invalid or expired code".to_string())
+    };
 
     let canonical = normalize_recovery_code(&req.code).ok_or_else(invalid)?;
     let user_id = state

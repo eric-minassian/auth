@@ -40,19 +40,11 @@ pub async fn userinfo(
     else {
         return unauthorized();
     };
-    // Only an access token may hit userinfo. Enforce the media type explicitly
-    // (RFC 9068 §4 / RFC 8725 §3.11) rather than inferring from the presence of
-    // a `client_id` claim: an id_token (typ "JWT") or logout token
-    // (typ "logout+jwt") must be rejected here even though they share a signer.
-    if jsonwebtoken::decode_header(token)
-        .ok()
-        .and_then(|h| h.typ)
-        .as_deref()
-        != Some("at+jwt")
-    {
-        return unauthorized();
-    }
-    let Some(claims) = verify_own_jws(&state.signer, &state.cfg.issuer, token) else {
+    // Only an access token may hit userinfo (RFC 9068 §4 / RFC 8725 §3.11):
+    // the pinned `at+jwt` typ rejects an id_token ("JWT") or logout token
+    // ("logout+jwt") even though they share a signer.
+    let Some(claims) = verify_own_jws(&state.signer, &state.cfg.issuer, token, "at+jwt", false)
+    else {
         return unauthorized();
     };
     let scope = claims["scope"].as_str().unwrap_or_default().to_string();
