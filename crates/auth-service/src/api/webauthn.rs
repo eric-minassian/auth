@@ -255,12 +255,16 @@ pub async fn login_finish(
     let result = async {
         // Identify by the credential id in the assertion; userHandle is
         // cross-checked only when present. Authentication itself rests on the
-        // signature check against the stored public key.
+        // signature check against the stored public key. An id we have no
+        // record of gets the distinguishable `unknown_credential` code
+        // (unguessable ids → no enumeration value) so the client can prune
+        // the ghost entry from the platform's passkey manager
+        // (`signalUnknownCredential`).
         let stored = state
             .store
             .get_credential(&b64u(&req.credential.raw_id))
             .await?
-            .ok_or_else(uniform)?;
+            .ok_or(ApiError::UnknownCredential)?;
         if let Some(handle) = req.credential.response.user_handle.as_ref() {
             let claimed = Uuid::from_slice(handle.as_ref()).map_err(|_| uniform())?;
             if claimed != stored.user_id {

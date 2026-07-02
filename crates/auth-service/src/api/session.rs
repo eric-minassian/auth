@@ -15,6 +15,10 @@ use crate::state::AppState;
 pub struct SessionUser {
     pub user_id: String,
     pub nickname: String,
+    /// Present (true) when a recovery redemption left older passkeys that the
+    /// owner has not yet reviewed — the SPA routes to the review screen.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_credential_review: Option<bool>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -53,6 +57,7 @@ pub async fn get(
         "user": {
             "user_id": user.user_id,
             "nickname": user.nickname,
+            "pending_credential_review": user.pending_credential_review.then_some(true),
         },
         "session": {
             "created_at": session.created_at,

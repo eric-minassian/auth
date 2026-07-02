@@ -49,6 +49,86 @@
             }
           }
         }
+      },
+      "patch": {
+        "tags": [
+          "account"
+        ],
+        "summary": "PATCH /api/account — update the display nickname. `updated_at` is bumped,\nwhich the `profile` scope surfaces to RPs (id_token/userinfo) so they can\nrefresh cached copies; the SPA also signals the platform passkey manager\n(`signalCurrentUserDetails`) so passkey entries show the new name.",
+        "operationId": "update_account",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateAccountRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/account/credential-review/complete": {
+      "post": {
+        "tags": [
+          "account"
+        ],
+        "summary": "POST /api/account/credential-review/complete — the owner has reviewed\n(kept or deleted) every passkey that survived a recovery; clear the flag\nthat blocks `/oauth/authorize`. Deletions themselves go through the\nnormal passkey-deletion endpoint (with its step-up gate and session\ncascade) before this is called.",
+        "operationId": "complete_credential_review",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/api/account/passkeys": {
@@ -261,6 +341,37 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/SessionList"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/account/sessions/revoke-others": {
+      "post": {
+        "tags": [
+          "account"
+        ],
+        "summary": "POST /api/account/sessions/revoke-others — sign out everywhere else: one\ncall revokes every session except the caller's (each cascading to refresh\nfamilies + back-channel logout). One rate token and one audit event for\nthe whole sweep — the previous SPA-side per-session loop burned a rate\ntoken per session and could rate-limit itself halfway through.",
+        "operationId": "revoke_other_sessions",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RevokeOthersResponse"
                 }
               }
             }
@@ -1037,6 +1148,24 @@
           }
         }
       },
+      "RevokeOthersResponse": {
+        "type": "object",
+        "required": [
+          "ok",
+          "revoked"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "revoked": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Number of sessions revoked (excludes the caller's own).",
+            "minimum": 0
+          }
+        }
+      },
       "SessionInfo": {
         "type": "object",
         "required": [
@@ -1141,6 +1270,13 @@
           "nickname": {
             "type": "string"
           },
+          "pending_credential_review": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Present (true) when a recovery redemption left older passkeys that the\nowner has not yet reviewed — the SPA routes to the review screen."
+          },
           "user_id": {
             "type": "string"
           }
@@ -1242,6 +1378,18 @@
           },
           "token_type": {
             "type": "string"
+          }
+        }
+      },
+      "UpdateAccountRequest": {
+        "type": "object",
+        "required": [
+          "nickname"
+        ],
+        "properties": {
+          "nickname": {
+            "type": "string",
+            "description": "New display nickname (non-unique, mutable, never an identifier)."
           }
         }
       }
