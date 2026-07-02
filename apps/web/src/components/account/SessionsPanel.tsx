@@ -58,17 +58,16 @@ export function SessionsPanel(props: { sessions: SessionListItem[] }) {
     void run(
       "revoke-others",
       async () => {
-        const results = await Promise.allSettled(
-          others.map((s) => api.del(`/api/account/sessions/${encodeURIComponent(s.session_id)}`)),
+        // One server-side sweep: a single rate token and a single audit
+        // event, instead of a per-session loop that could rate-limit itself.
+        const { revoked } = await api.post<{ ok: boolean; revoked: number }>(
+          "/api/account/sessions/revoke-others",
         );
-        const failed = results.filter((r) => r.status === "rejected").length;
-        if (failed > 0) {
-          toast.warning(`${failed} session${failed === 1 ? "" : "s"} couldn't be signed out`);
-        } else {
-          toast.success("Signed out everywhere else");
-        }
+        toast.success(
+          revoked === 1 ? "Signed out 1 other session" : `Signed out ${revoked} other sessions`,
+        );
       },
-      {},
+      { error: "Could not sign out other sessions" },
     );
   }
 

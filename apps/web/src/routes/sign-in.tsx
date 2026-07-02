@@ -3,14 +3,17 @@ import { Button } from "@eric-minassian/design/components/button";
 import { Field, FieldLabel } from "@eric-minassian/design/components/field";
 import { Input } from "@eric-minassian/design/components/input";
 import { Spinner } from "@eric-minassian/design/components/spinner";
-import { Link, createRoute } from "@tanstack/react-router";
+import { Link, createRoute, useNavigate } from "@tanstack/react-router";
 import { useEffect, useRef, useState } from "react";
+import { toast } from "sonner";
 
 import { AuthCard } from "../components/AuthCard.js";
 import { useTitle } from "../hooks/useTitle.js";
+import { api, type SessionInfo } from "../lib/api.js";
 import { resumeAfterLogin } from "../lib/return-to.js";
 import {
   describePasskeyError,
+  getRecoveryReadiness,
   isUserCancellation,
   loginWithPasskey,
   supportsConditionalUi,
@@ -29,6 +32,7 @@ interface SignInError {
 
 function SignIn() {
   useTitle("Sign in");
+  const navigate = useNavigate();
   const { return_to } = signInRoute.useSearch();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<SignInError | undefined>();
@@ -40,6 +44,45 @@ function SignIn() {
   // abort it — only one WebAuthn get() may be outstanding at a time.
   const conditional = useRef<AbortController | undefined>(undefined);
 
+  /**
+   * Post-login routing. A pending post-recovery credential review detours to
+   * the review screen (authorize would bounce there anyway); a mid-OAuth
+   * return_to resumes the authorization; otherwise land on the account page —
+   * with a one-time backup-passkey nudge for single-passkey accounts.
+   */
+  async function afterLogin() {
+    let session: SessionInfo | undefined;
+    try {
+      session = await api.get<SessionInfo>("/api/session");
+    } catch {
+      // Fall through to the default destination; the server re-gates anyway.
+    }
+    if (session?.user.pending_credential_review) {
+      void navigate({ to: "/review-passkeys", search: { return_to } });
+      return;
+    }
+    if (return_to) {
+      resumeAfterLogin(return_to);
+      return;
+    }
+    void (async () => {
+      try {
+        const readiness = await getRecoveryReadiness();
+        if (readiness.passkey_count === 1) {
+          toast("Add a second passkey so losing this one never locks you out", {
+            action: {
+              label: "Add passkey",
+              onClick: () => void navigate({ to: "/account", search: { tab: "passkeys" } }),
+            },
+          });
+        }
+      } catch {
+        // Best-effort nudge only.
+      }
+    })();
+    void navigate({ to: "/account", search: {} });
+  }
+
   // Conditional UI: arm the autofill-driven passkey prompt on mount.
   useEffect(() => {
     const controller = new AbortController();
@@ -50,7 +93,7 @@ function SignIn() {
       if (!cancelled) setAutofillReady(true);
       try {
         await loginWithPasskey({ conditional: true, signal: controller.signal });
-        if (!cancelled) resumeAfterLogin(return_to);
+        if (!cancelled) void afterLogin();
       } catch {
         // Aborted or no autofill selection — the explicit button still works.
       }
@@ -68,7 +111,7 @@ function SignIn() {
     conditional.current?.abort();
     try {
       await loginWithPasskey();
-      resumeAfterLogin(return_to);
+      await afterLogin();
     } catch (e) {
       setError({
         text: describePasskeyError(e, "Sign-in failed. Try again, or recover your account."),
