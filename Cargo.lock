@@ -151,7 +151,7 @@ dependencies = [
  "axum-test",
  "base64 0.22.1",
  "garde",
- "hmac 0.12.1",
+ "hmac 0.13.0",
  "http 1.4.2",
  "jsonwebtoken",
  "lambda_http",

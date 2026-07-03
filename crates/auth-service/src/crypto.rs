@@ -42,14 +42,15 @@ pub fn ct_eq(a: &str, b: &str) -> bool {
 /// HMAC-SHA256 tag. Used to derive self-validating values (DPoP nonces) from
 /// a server-side key without per-value storage.
 pub fn hmac_sha256(key: &[u8; 32], msg: impl AsRef<[u8]>) -> [u8; 32] {
+    use hmac::digest::KeyInit;
     use hmac::{Hmac, Mac};
     // HMAC-SHA256 accepts keys of any length, so this arm is unreachable for
     // our fixed 32-byte key; the zero tag keeps the function total without an
     // unwrap (both derivation and validation share this same path).
-    let Ok(mut mac) = <Hmac<Sha256> as Mac>::new_from_slice(key) else {
+    let Ok(mut mac) = <Hmac<Sha256> as KeyInit>::new_from_slice(key) else {
         return [0u8; 32];
     };
-    mac.update(msg.as_ref());
+    Mac::update(&mut mac, msg.as_ref());
     let mut out = [0u8; 32];
     out.copy_from_slice(&mac.finalize().into_bytes());
     out
