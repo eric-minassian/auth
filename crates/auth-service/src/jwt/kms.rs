@@ -132,13 +132,14 @@ mod tests {
     use super::*;
     use p256::ecdsa::signature::Signer as _;
     use p256::ecdsa::{SigningKey, VerifyingKey, signature::Verifier};
+    use rand::Rng;
 
     #[test]
     fn der_to_raw_round_trips_and_verifies() {
         // p256 0.13 wants a rand_core 0.6 RNG; draw bytes ourselves.
         let key = loop {
             let mut bytes = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rng(), &mut bytes);
+            rand::rng().fill_bytes(&mut bytes);
             if let Ok(k) = SigningKey::from_slice(&bytes) {
                 break k;
             }
