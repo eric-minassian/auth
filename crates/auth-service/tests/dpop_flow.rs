@@ -12,7 +12,7 @@ use harness::TestApp;
 use harness::flows;
 use p256::ecdsa::signature::Signer as _;
 use p256::ecdsa::{Signature, SigningKey};
-use rand::RngCore;
+use rand::Rng;
 use url::Url;
 
 const RP_CALLBACK: &str = "http://rp.example.com/callback";
