@@ -160,7 +160,7 @@ mod tests {
     use super::*;
     use p256::ecdsa::SigningKey;
     use p256::ecdsa::signature::Signer;
-    use rand::RngCore;
+    use rand::Rng;
 
     use crate::crypto::b64u;
 
