@@ -26,6 +26,23 @@
         "http://localhost:4321"
       ],
       "scopes": ["openid", "profile", "offline_access"]
+    },
+    {
+      "client_id": "plan",
+      "client_name": "TripPlan",
+      "redirect_uris": [
+        "https://plan.ericminassian.com/auth/callback",
+        "http://localhost:5173/auth/callback"
+      ],
+      "post_logout_redirect_uris": [
+        "https://plan.ericminassian.com/",
+        "http://localhost:5173/"
+      ],
+      "allowed_origins": [
+        "https://plan.ericminassian.com",
+        "http://localhost:5173"
+      ],
+      "scopes": ["openid", "profile", "offline_access"]
     }
   ]
 }
