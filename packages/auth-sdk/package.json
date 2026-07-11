@@ -1,6 +1,6 @@
 {
   "name": "@ericminassian/auth",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "TypeScript SDK for auth.ericminassian.com — OIDC client, React bindings, and server-side JWT verification.",
   "license": "MIT",
   "repository": {
