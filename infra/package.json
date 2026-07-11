@@ -25,7 +25,7 @@
     "@types/node": "^22.10.0",
     "aws-cdk": "^2.1129.0",
     "tsx": "^4.22.5",
-    "typescript": "~5.7.0",
+    "typescript": "~6.0.3",
     "vitest": "^4.1.9"
   }
 }
