@@ -71,7 +71,7 @@
     "@types/express": "^5.0.0",
     "@types/react": "^19",
     "express": "^5.1.0",
-    "hono": "^4.6.0",
+    "hono": "^4.12.27",
     "openapi-typescript": "^7.4.0",
     "react": "^19.0.0",
     "tsdown": "^0.15.0",
