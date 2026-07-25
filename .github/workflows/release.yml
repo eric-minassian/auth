@@ -23,7 +23,7 @@ jobs:
     steps:
       # Actions pinned to commit SHAs (mutable tags are a supply-chain risk —
       # CVE-2025-30066); the trailing comment is the version Dependabot tracks.
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # Enable pnpm via corepack: reads the pinned version from package.json's
       # packageManager field and runs on the setup-node Node (pnpm 11.x needs Node
       # >=22.13). corepack uses pnpm's default store path; pnpm/action-setup nests
