@@ -15,16 +15,16 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@aws-sdk/client-cloudformation": "^3.700.0",
-    "@aws-sdk/client-dynamodb": "^3.700.0",
-    "@aws-sdk/lib-dynamodb": "^3.700.0",
-    "aws-cdk-lib": "^2.220.0",
-    "constructs": "^10.4.0"
+    "@aws-sdk/client-cloudformation": "^3.1129.0",
+    "@aws-sdk/client-dynamodb": "^3.1129.0",
+    "@aws-sdk/lib-dynamodb": "^3.1129.0",
+    "aws-cdk-lib": "^2.268.0",
+    "constructs": "^10.8.1"
   },
   "devDependencies": {
-    "@types/node": "^26.1.1",
-    "aws-cdk": "^2.1027.0",
-    "tsx": "^4.19.0",
+    "@types/node": "^26.5.1",
+    "aws-cdk": "^2.1141.0",
+    "tsx": "^4.23.13",
     "typescript": "~6.0.3",
     "vitest": "^4.1.9"
   }
