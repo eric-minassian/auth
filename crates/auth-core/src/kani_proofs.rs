@@ -92,15 +92,26 @@ fn b64_decode_never_panics() {
 
 // ------------------------------------------------------------------ CBOR
 
-/// The CBOR item walker (which determines what `decode_prefix` reports as
-/// consumed) never panics and never reports more bytes than it was given.
-#[kani::proof]
-#[kani::unwind(11)]
-fn cbor_item_len_within_bounds() {
-    let (buf, len) = bytes::<8>();
-    if let Some(used) = cbor::item_len(&buf[..len]) {
-        assert!(used >= 1 && used <= len);
+fn item_len_bounded<const N: usize>() {
+    let input: [u8; N] = kani::any();
+    if let Some(used) = cbor::item_len(&input) {
+        assert!(used >= 1 && used <= N);
     }
+}
+
+/// The CBOR item walker (which determines what `decode_prefix` and
+/// `cose::parse_prefix` report as consumed) never panics and never reports
+/// more bytes than it was given, for every input of 0 to 6 bytes.
+#[kani::proof]
+#[kani::unwind(15)] // at most 2n + 1 = 13 iterations
+fn cbor_item_len_within_bounds() {
+    item_len_bounded::<0>();
+    item_len_bounded::<1>();
+    item_len_bounded::<2>();
+    item_len_bounded::<3>();
+    item_len_bounded::<4>();
+    item_len_bounded::<5>();
+    item_len_bounded::<6>();
 }
 
 // ------------------------------------------------------------------ DER

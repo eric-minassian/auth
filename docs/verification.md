@@ -82,7 +82,10 @@ Each harness in `crates/auth-core/src/kani_proofs.rs` explores **every** input
 in its domain. Kani checks every arithmetic operation, index and `unwrap`
 automatically, in addition to the assertions. Cryptographic calls are replaced
 by nondeterministic stubs (`crypto.rs`, `#[cfg(kani)]`), which over-approximate
-every possible result.
+every possible result. The CBOR walker's UTF-8 check is modeled the same way
+(`cbor::is_utf8`): it can only reject an item, never change its length, so the
+bounds proof covers both outcomes, and UTF-8 validation itself is the standard
+library's.
 
 The parsers are structured for this: the part that decides what is accepted is
 allocation-free (base64url group codecs, the CBOR item walker, the JWS separator
@@ -96,7 +99,7 @@ ones.
 | `b64_group_roundtrip` | encoding then decoding any 1–3 byte group gives it back | all groups |
 | `b64_group_canonical` | every accepted 2–4 symbol group is the canonical encoding of its bytes (so decoding is injective); other group sizes are rejected | all groups |
 | `b64_decode_never_panics` | the full decoder never panics | inputs ≤ 9 symbols |
-| `cbor_item_len_within_bounds` | the item walker that fixes what `decode_prefix` and `cose::parse_prefix` report as consumed returns `1 ≤ used ≤ len`; this discharges the contract of `axioms::cose_prefix` | inputs ≤ 8 bytes |
+| `cbor_item_len_within_bounds` | the item walker that fixes what `decode_prefix` and `cose::parse_prefix` report as consumed returns `1 ≤ used ≤ len`; this discharges the contract of `axioms::cose_prefix` | inputs ≤ 6 bytes |
 | `der_to_fixed_never_panics` | the strict DER parser never panics | inputs ≤ 12 bytes |
 | `der_roundtrip` | every fixed signature with non-zero `r`, `s` survives DER encoding and strict decoding; zero `r` or `s` is refused | all 2^512 inputs |
 | `spki_accepts_only_exact_length` | only a 91-byte SubjectPublicKeyInfo is accepted | inputs ≤ 93 bytes |

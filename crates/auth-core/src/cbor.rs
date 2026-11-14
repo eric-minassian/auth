@@ -190,13 +190,29 @@ fn head(input: &[u8], pos: usize) -> Option<(u8, u8, u64, usize)> {
     Some((major, info, arg, p))
 }
 
+/// UTF-8 validity of a text string (delegated to the standard library).
+#[cfg(not(kani))]
+fn is_utf8(s: &[u8]) -> bool {
+    core::str::from_utf8(s).is_ok()
+}
+
+/// Kani model: either outcome. The check can only reject an item, never change
+/// the reported length, so over-approximating it keeps the bounds proof sound
+/// while avoiding the standard library's word-at-a-time validator.
+#[cfg(kani)]
+fn is_utf8(_s: &[u8]) -> bool {
+    kani::any()
+}
+
 /// The length of the data item at the start of `input`, under the decoder's
 /// rules except duplicate-key detection (which needs the values). This is the
 /// allocation-free core Kani checks: a returned length is always within the
 /// input.
 ///
 /// Iterative, with an explicit stack of how many items each open container
-/// still expects, so every loop iteration consumes at least one input byte.
+/// still expects. Each iteration either reads one item header (at least one
+/// byte) or closes one container, so an input of `n` bytes takes at most
+/// `2n + 1` iterations.
 pub(crate) fn item_len(input: &[u8]) -> Option<usize> {
     // pending[d]: items still expected at nesting level d (level 0 = top).
     let mut pending = [0u64; MAX_DEPTH + 1];
@@ -204,11 +220,12 @@ pub(crate) fn item_len(input: &[u8]) -> Option<usize> {
     let mut depth = 0usize;
     let mut pos = 0usize;
     loop {
-        while pending[depth] == 0 {
+        if pending[depth] == 0 {
             if depth == 0 {
                 return Some(pos);
             }
             depth -= 1;
+            continue;
         }
         pending[depth] -= 1;
         let (major, info, arg, next) = head(input, pos)?;
@@ -218,8 +235,8 @@ pub(crate) fn item_len(input: &[u8]) -> Option<usize> {
             2 | 3 => {
                 let end = pos.checked_add(usize::try_from(arg).ok()?)?;
                 let s = input.get(pos..end)?;
-                if major == 3 {
-                    core::str::from_utf8(s).ok()?;
+                if major == 3 && !is_utf8(s) {
+                    return None;
                 }
                 pos = end;
             }
