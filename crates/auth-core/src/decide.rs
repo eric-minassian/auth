@@ -964,6 +964,10 @@ pub struct Identity {
     pub jkt: Vec<u8>,
     /// The proof's `jti`, for replay tracking.
     pub dpop_jti: Vec<u8>,
+    /// The passkey that started the session (`cid`), if the token carries it.
+    pub cid: Option<Vec<u8>>,
+    /// The session's epoch (`epoch`), if the token carries it.
+    pub epoch: Option<u64>,
 }
 
 /// A resource request is accepted iff the access token is valid, the DPoP
@@ -979,7 +983,9 @@ pub fn check_resource_request(token: &[u8], proof: &[u8], a: &AccessExpect, d: &
         r matches Ok(id) ==> id.sub@ == access_claims_of(token@).sub
             && id.client_id@ == access_claims_of(token@).client_id
             && id.auth_time == access_claims_of(token@).auth_time
-            && id.jkt@ == dpop_jkt(proof@),
+            && id.jkt@ == dpop_jkt(proof@)
+            && opt_view(id.cid) == access_claims_of(token@).cid
+            && id.epoch == access_claims_of(token@).epoch,
 {
     match &d.access_token {
         Some(t) => {
@@ -1007,6 +1013,8 @@ pub fn check_resource_request(token: &[u8], proof: &[u8], a: &AccessExpect, d: &
         exp: c.exp,
         jkt: p.jkt,
         dpop_jti: p.jti,
+        cid: c.cid,
+        epoch: c.epoch,
     })
 }
 
@@ -1202,6 +1210,24 @@ pub fn authorize_refresh(v: &VerifiedRefresh, s: &AccountState) -> (r: Result<Li
 }
 
 // =================================================================== small rules
+
+/// A session is still active iff it carries a session reference, its passkey
+/// is still registered and the account's epoch is unchanged (protocol §10.7).
+/// Used by the account API so revocation takes effect there immediately rather
+/// than when access tokens expire.
+pub open spec fn session_active(epoch: Option<u64>, s: AccountState) -> bool {
+    &&& epoch matches Some(e) && e == s.epoch
+    &&& s.credential_present
+}
+
+pub fn check_session_active(epoch: Option<u64>, s: &AccountState) -> (r: bool)
+    ensures r == session_active(epoch, *s),
+{
+    match epoch {
+        Some(e) => e == s.epoch && s.credential_present,
+        None => false,
+    }
+}
 
 /// Step-up rule (protocol §10.7): the passkey ceremony happened at most
 /// `STEP_UP_MAX_AGE` seconds ago (and not in the future).

@@ -149,7 +149,11 @@ fn from_value(map: &Value<'_>) -> Option<PublicKey> {
 /// Parses a COSE_Key at the start of `input`. Returns the key and the number of
 /// bytes it occupies (the authenticator data may continue with extensions).
 pub fn parse_prefix(input: &[u8]) -> Option<(PublicKey, usize)> {
-    let (value, used) = cbor::decode_prefix(input)?;
+    // The reported length is exactly the CBOR item extent, which Kani proves
+    // is non-zero and within `input` (`cbor_item_len_within_bounds`). This is
+    // the contract `axioms::cose_prefix` assumes.
+    let used = cbor::item_len(input)?;
+    let value = cbor::decode_exact(input.get(..used)?)?;
     let key = from_value(&value)?;
     Some((key, used))
 }

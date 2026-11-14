@@ -13,7 +13,7 @@
 //!
 //! Run with `cargo kani -p auth-core`.
 
-use crate::{b64, cbor, cose, crockford, der, spki, wire};
+use crate::{b64, cbor, crockford, der, spki, wire};
 
 /// A symbolic byte string of length at most `N`.
 fn bytes<const N: usize>() -> ([u8; N], usize) {
@@ -35,6 +35,7 @@ fn encode_group_roundtrip<const N: usize>() {
 
 /// Encoding then decoding any group of 1–3 bytes gives the same bytes.
 #[kani::proof]
+#[kani::unwind(5)]
 fn b64_group_roundtrip() {
     encode_group_roundtrip::<1>();
     encode_group_roundtrip::<2>();
@@ -55,6 +56,7 @@ fn decode_group_canonical<const N: usize>() {
 /// no two different strings decode to the same bytes. Groups of 0, 1 or more
 /// than 4 symbols are rejected.
 #[kani::proof]
+#[kani::unwind(7)]
 fn b64_group_canonical() {
     decode_group_canonical::<2>();
     decode_group_canonical::<3>();
@@ -93,26 +95,11 @@ fn b64_decode_never_panics() {
 /// The CBOR item walker (which determines what `decode_prefix` reports as
 /// consumed) never panics and never reports more bytes than it was given.
 #[kani::proof]
-#[kani::unwind(10)]
+#[kani::unwind(11)]
 fn cbor_item_len_within_bounds() {
     let (buf, len) = bytes::<8>();
     if let Some(used) = cbor::item_len(&buf[..len]) {
         assert!(used >= 1 && used <= len);
-    }
-}
-
-// ------------------------------------------------------------------ COSE
-
-/// Contract assumed by `axioms::cose_prefix`: a reported length is non-zero,
-/// within the input, and exactly the CBOR item's extent.
-#[kani::proof]
-#[kani::unwind(8)]
-fn cose_prefix_within_bounds() {
-    let (buf, len) = bytes::<6>();
-    let input = &buf[..len];
-    if let Some((_, used)) = cose::parse_prefix(input) {
-        assert!(used >= 1 && used <= len);
-        assert!(cbor::item_len(input) == Some(used));
     }
 }
 

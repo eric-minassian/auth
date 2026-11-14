@@ -266,6 +266,10 @@ pub struct AccessClaims {
     pub auth_time: u64,
     /// `cnf.jkt`, base64url-decoded.
     pub jkt: Vec<u8>,
+    /// `cid`, base64url-decoded: the passkey that started the session.
+    pub cid: Option<Vec<u8>>,
+    /// `epoch`: the account's session epoch when the session started.
+    pub epoch: Option<u64>,
 }
 
 /// Ghost view of [`AccessClaims`].
@@ -279,6 +283,8 @@ pub ghost struct AccessClaimsV {
     pub jti: Seq<u8>,
     pub auth_time: u64,
     pub jkt: Seq<u8>,
+    pub cid: Option<Seq<u8>>,
+    pub epoch: Option<u64>,
 }
 
 impl View for AccessClaims {
@@ -295,6 +301,8 @@ impl View for AccessClaims {
             jti: self.jti@,
             auth_time: self.auth_time,
             jkt: self.jkt@,
+            cid: opt_view(self.cid),
+            epoch: self.epoch,
         }
     }
 }

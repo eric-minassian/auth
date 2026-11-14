@@ -190,39 +190,50 @@ fn head(input: &[u8], pos: usize) -> Option<(u8, u8, u64, usize)> {
     Some((major, info, arg, p))
 }
 
-fn walk(input: &[u8], pos: usize, depth: usize) -> Option<usize> {
-    let (major, info, arg, mut p) = head(input, pos)?;
-    match major {
-        0 | 1 => Some(p),
-        2 | 3 => {
-            let end = p.checked_add(usize::try_from(arg).ok()?)?;
-            let s = input.get(p..end)?;
-            if major == 3 {
-                core::str::from_utf8(s).ok()?;
-            }
-            Some(end)
-        }
-        4 | 5 => {
-            if arg > MAX_ITEMS || depth >= MAX_DEPTH {
-                return None;
-            }
-            let count = if major == 5 { arg * 2 } else { arg };
-            for _ in 0..count {
-                p = walk(input, p, depth.checked_add(1)?)?;
-            }
-            Some(p)
-        }
-        7 if matches!(info, 20..=22) => Some(p),
-        _ => None,
-    }
-}
-
 /// The length of the data item at the start of `input`, under the decoder's
 /// rules except duplicate-key detection (which needs the values). This is the
 /// allocation-free core Kani checks: a returned length is always within the
 /// input.
+///
+/// Iterative, with an explicit stack of how many items each open container
+/// still expects, so every loop iteration consumes at least one input byte.
 pub(crate) fn item_len(input: &[u8]) -> Option<usize> {
-    walk(input, 0, 0)
+    // pending[d]: items still expected at nesting level d (level 0 = top).
+    let mut pending = [0u64; MAX_DEPTH + 1];
+    pending[0] = 1;
+    let mut depth = 0usize;
+    let mut pos = 0usize;
+    loop {
+        while pending[depth] == 0 {
+            if depth == 0 {
+                return Some(pos);
+            }
+            depth -= 1;
+        }
+        pending[depth] -= 1;
+        let (major, info, arg, next) = head(input, pos)?;
+        pos = next;
+        match major {
+            0 | 1 => {}
+            2 | 3 => {
+                let end = pos.checked_add(usize::try_from(arg).ok()?)?;
+                let s = input.get(pos..end)?;
+                if major == 3 {
+                    core::str::from_utf8(s).ok()?;
+                }
+                pos = end;
+            }
+            4 | 5 => {
+                if arg > MAX_ITEMS || depth >= MAX_DEPTH {
+                    return None;
+                }
+                depth += 1;
+                pending[depth] = if major == 5 { arg * 2 } else { arg };
+            }
+            7 if matches!(info, 20..=22) => {}
+            _ => return None,
+        }
+    }
 }
 
 /// Decodes one data item from the start of `input` and returns it together

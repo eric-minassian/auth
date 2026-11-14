@@ -49,6 +49,12 @@ pub struct AccessTokenClaims {
     pub auth_time: u64,
     pub amr: Vec<String>,
     pub cnf: Cnf,
+    /// Session ID (constant across refreshes).
+    pub sid: String,
+    /// base64url credential ID of the passkey that started the session.
+    pub cid: String,
+    /// Account session epoch when the session started.
+    pub epoch: u64,
 }
 
 /// Refresh token claims (protocol §6.2).

@@ -272,6 +272,10 @@ struct RawAccessClaims {
     jti: String,
     auth_time: u64,
     cnf: RawCnf,
+    #[serde(default)]
+    cid: Option<String>,
+    #[serde(default)]
+    epoch: Option<u64>,
 }
 
 /// Parses access-token claims (protocol §6.1). `aud` must be a single string.
@@ -287,6 +291,11 @@ pub fn parse_access_claims(json: &[u8]) -> Option<AccessClaims> {
         jti: c.jti.into_bytes(),
         auth_time: c.auth_time,
         jkt: decode_b64(&c.cnf.jkt)?,
+        cid: match &c.cid {
+            Some(cid) => Some(decode_b64(cid)?),
+            None => None,
+        },
+        epoch: c.epoch,
     })
 }
 

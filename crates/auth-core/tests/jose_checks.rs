@@ -193,6 +193,9 @@ fn access_claims(key: &DpopKey, iat: u64) -> AccessTokenClaims {
         auth_time: iat - 10,
         amr: jose::AMR.iter().map(|s| (*s).to_string()).collect(),
         cnf: Cnf { jkt: key.jkt() },
+        sid: b64::encode(&[4; 16]),
+        cid: b64::encode(b"credential"),
+        epoch: 3,
     }
 }
 
@@ -225,6 +228,36 @@ fn resource_request_accepts_bound_token_and_proof() {
     assert_eq!(id.sub, b"acct");
     assert_eq!(id.client_id, b"web");
     assert_eq!(b64::encode(&id.jkt), key.jkt());
+    assert_eq!(id.cid.as_deref(), Some(&b"credential"[..]));
+    assert_eq!(id.epoch, Some(3));
+}
+
+#[test]
+fn session_activity_rule() {
+    use auth_core::decide::check_session_active;
+    let live = AccountState {
+        epoch: 3,
+        credential_present: true,
+    };
+    assert!(check_session_active(Some(3), &live));
+    assert!(
+        !check_session_active(Some(2), &live),
+        "signed out everywhere"
+    );
+    assert!(
+        !check_session_active(None, &live),
+        "token without a session reference"
+    );
+    assert!(
+        !check_session_active(
+            Some(3),
+            &AccountState {
+                epoch: 3,
+                credential_present: false
+            }
+        ),
+        "passkey removed"
+    );
 }
 
 #[test]
