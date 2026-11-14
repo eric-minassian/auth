@@ -184,6 +184,21 @@ pub struct Identity {
     pub expires_at: u64,
     /// base64url thumbprint of the caller's DPoP key.
     pub key_thumbprint: String,
+    /// The session the token belongs to, if the token carries a reference
+    /// (tokens from this auth service always do).
+    pub session: Option<SessionRef>,
+}
+
+/// The session an access token belongs to: the passkey that started it and the
+/// account epoch at that time. A resource server that wants revocation to take
+/// effect immediately (rather than within the access token lifetime) can check
+/// these against the account state, as the auth service's account API does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionRef {
+    /// base64url credential ID of the passkey that started the session.
+    pub credential_id: String,
+    /// The account's session epoch when the session started.
+    pub epoch: u64,
 }
 
 impl Identity {
@@ -396,6 +411,13 @@ impl Verifier {
             auth_time: id.auth_time,
             expires_at: id.exp,
             key_thumbprint: b64::encode(&id.jkt),
+            session: match (id.cid, id.epoch) {
+                (Some(cid), Some(epoch)) => Some(SessionRef {
+                    credential_id: b64::encode(&cid),
+                    epoch,
+                }),
+                _ => None,
+            },
         })
     }
 

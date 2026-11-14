@@ -381,6 +381,7 @@ async fn sign_out_everywhere_revokes_refresh() {
     let t_laptop = laptop.sign_in_ok(&mut passkey).await;
 
     let at = phone.account_token(&t_phone).await;
+    let laptop_at = laptop.account_token(&t_laptop).await;
     let r = phone
         .request(
             Method::POST,
@@ -391,6 +392,14 @@ async fn sign_out_everywhere_revokes_refresh() {
         )
         .await;
     assert_eq!(r.status, StatusCode::NO_CONTENT, "{r:?}");
+
+    // Revocation is immediate at the account API, even though the laptop's
+    // access token has not expired yet.
+    let r = laptop
+        .request(Method::GET, "/v1/account", None, true, Some(&laptop_at))
+        .await;
+    assert_eq!(r.status, StatusCode::UNAUTHORIZED, "{r:?}");
+    assert_eq!(r.error(), "invalid_token");
 
     assert_eq!(
         laptop.refresh(&t_laptop.refresh_token, None).await.error(),
@@ -532,6 +541,7 @@ async fn recovery_replaces_passkeys_and_revokes_sessions() {
     old_device.prime_nonce().await;
     let mut lost = SoftAuthenticator::new();
     let (old_tokens, account_id, code) = old_device.sign_up(&mut lost).await;
+    let old_at = old_device.account_token(&old_tokens).await;
 
     // Recovery on a new device with a new passkey. Typed codes are normalized.
     let mut device = Client::new(&env);
@@ -559,6 +569,14 @@ async fn recovery_replaces_passkeys_and_revokes_sessions() {
     );
 
     // Old sessions and the old passkey are dead; the old code is single-use.
+    let r = old_device
+        .request(Method::GET, "/v1/account", None, true, Some(&old_at))
+        .await;
+    assert_eq!(
+        r.error(),
+        "invalid_token",
+        "account API rejects revoked sessions at once"
+    );
     assert_eq!(
         old_device
             .refresh(&old_tokens.refresh_token, None)

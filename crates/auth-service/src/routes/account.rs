@@ -9,7 +9,7 @@ use crate::options;
 use crate::state::AppState;
 use crate::store::{AddError, Ceremony, CeremonyKind, CredentialRecord, RemoveError};
 use auth_core::b64;
-use auth_core::decide::{self, CEREMONY_TTL, MAX_PASSKEYS_PER_ACCOUNT};
+use auth_core::decide::{self, AccountState, CEREMONY_TTL, MAX_PASSKEYS_PER_ACCOUNT};
 use auth_core::webauthn::{self, RegistrationResponseJson};
 use auth_verifier::{Identity, RequestParts, VerifyError};
 use axum::Json;
@@ -38,7 +38,33 @@ impl FromRequestParts<AppState> for Caller {
             .map_or_else(|| parts.uri.path().to_owned(), |u| u.0.path().to_owned());
         let req = RequestParts::from_http(parts, &path)?;
         let id = state.account_api.verify_at(&req, state.clock.now()).await?;
+        require_active_session(state, &id).await?;
         Ok(Caller(id))
+    }
+}
+
+/// Revocation takes effect immediately at the account API: the session's
+/// passkey must still be registered and the account epoch unchanged
+/// (strongly consistent reads), not merely the access token unexpired.
+async fn require_active_session(state: &AppState, id: &Identity) -> Result<(), ApiError> {
+    let revoked = || ApiError::Verify(VerifyError::InvalidToken { reason: None });
+    let session = id.session.as_ref().ok_or_else(revoked)?;
+    let credential_id = b64::decode_str(&session.credential_id).ok_or_else(revoked)?;
+    let (meta, credential) = tokio::try_join!(
+        state.store.get_meta(&id.subject),
+        state.store.get_credential(&id.subject, &credential_id),
+    )?;
+    let Some(meta) = meta else {
+        return Err(revoked());
+    };
+    let account = AccountState {
+        epoch: meta.epoch,
+        credential_present: credential.is_some(),
+    };
+    if decide::check_session_active(Some(session.epoch), &account) {
+        Ok(())
+    } else {
+        Err(revoked())
     }
 }
 

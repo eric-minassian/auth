@@ -61,6 +61,9 @@ impl Fixture {
                 cnf: Cnf {
                     jkt: self.key.jkt(),
                 },
+                sid: b64::encode(&[1; 16]),
+                cid: b64::encode(b"passkey"),
+                epoch: 7,
             },
         )
     }
@@ -108,6 +111,13 @@ async fn accepts_a_valid_request() {
     assert_eq!(id.client_id, "web");
     assert_eq!(id.key_thumbprint, f.key.jkt());
     assert_eq!(id.expires_at, NOW + ACCESS_TOKEN_TTL);
+    assert_eq!(
+        id.session,
+        Some(auth_verifier::SessionRef {
+            credential_id: b64::encode(b"passkey"),
+            epoch: 7
+        })
+    );
     assert!(id.require_recent_authentication(NOW).is_ok());
     assert_eq!(
         id.require_recent_authentication(NOW - 30 + STEP_UP_MAX_AGE + 1),

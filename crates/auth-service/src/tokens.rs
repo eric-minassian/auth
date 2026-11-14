@@ -66,6 +66,9 @@ pub async fn issue(
         auth_time: s.auth_time,
         amr: jose::AMR.iter().map(|m| (*m).to_string()).collect(),
         cnf: cnf.clone(),
+        sid: s.sid.clone(),
+        cid: s.cid.clone(),
+        epoch: s.epoch,
     };
     let refresh = RefreshTokenClaims {
         iss: state.config.issuer.clone(),
