@@ -1,0 +1,34 @@
+{
+  "name": "auth-service-infra",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "AWS CDK infrastructure for the passkey-only, PII-free auth service",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "synth": "tsx scripts/prepare-example-asset.ts && cdk synth --quiet -c config=config/example.json",
+    "cdk": "cdk"
+  },
+  "dependencies": {
+    "aws-cdk-lib": "2.277.0",
+    "cdk-nag": "3.0.2",
+    "constructs": "10.8.1"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@types/node": "26.6.6",
+    "aws-cdk": "2.1148.1",
+    "eslint": "10.15.0",
+    "tsx": "4.23.15",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.72.2",
+    "vite": "8.3.8",
+    "vitest": "5.1.0"
+  }
+}

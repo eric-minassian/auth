@@ -1,0 +1,32 @@
+{
+  "stackName": "AuthServiceStack",
+  "account": "123456789012",
+  "region": "us-east-1",
+  "domainName": "auth.example.com",
+  "certificateArn": "arn:aws:acm:us-east-1:123456789012:certificate/00000000-0000-4000-8000-000000000000",
+  "hostedZone": { "id": "Z0123456789EXAMPLE", "name": "example.com" },
+  "rpId": "example.com",
+  "rpName": "Example",
+  "allowedOrigins": [
+    "https://app.example.com",
+    "android:apk-key-hash:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  ],
+  "corsOrigins": ["https://app.example.com"],
+  "audiences": ["https://api.example.com"],
+  "clientIds": ["web", "ios", "android", "cli"],
+  "lambdaAssetPath": "../.example-asset",
+  "reservedConcurrency": 100,
+  "waf": {
+    "rateLimitPerIp": 1000,
+    "sensitiveRateLimitPerIp": 60,
+    "evaluationWindowSeconds": 300
+  },
+  "apiThrottle": { "rateLimit": 100, "burstLimit": 200 },
+  "tlsSecurityPolicy": "SecurityPolicy_TLS13_1_2_PFS_PQ_2025_09",
+  "manageApiGatewayCloudWatchRole": true,
+  "keys": {
+    "accessToken": { "active": 1, "previous": [] },
+    "refreshToken": { "active": 1, "previous": [] },
+    "dpopNonce": { "active": 1 }
+  }
+}
