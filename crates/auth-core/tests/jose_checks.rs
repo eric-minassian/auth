@@ -195,6 +195,7 @@ fn access_claims(key: &DpopKey, iat: u64) -> AccessTokenClaims {
         cnf: Cnf { jkt: key.jkt() },
         sid: b64::encode(&[4; 16]),
         cid: b64::encode(b"credential"),
+        rid: b64::encode(b"registration"),
         epoch: 3,
     }
 }
@@ -229,34 +230,46 @@ fn resource_request_accepts_bound_token_and_proof() {
     assert_eq!(id.client_id, b"web");
     assert_eq!(b64::encode(&id.jkt), key.jkt());
     assert_eq!(id.cid.as_deref(), Some(&b"credential"[..]));
+    assert_eq!(id.rid.as_deref(), Some(&b"registration"[..]));
     assert_eq!(id.epoch, Some(3));
 }
 
 #[test]
 fn session_activity_rule() {
     use auth_core::decide::check_session_active;
+    let rid = Some(b"registration".to_vec());
     let live = AccountState {
         epoch: 3,
-        credential_present: true,
+        registration: rid.clone(),
     };
-    assert!(check_session_active(Some(3), &live));
+    assert!(check_session_active(Some(3), &rid, &live));
     assert!(
-        !check_session_active(Some(2), &live),
+        !check_session_active(Some(2), &rid, &live),
         "signed out everywhere"
     );
     assert!(
-        !check_session_active(None, &live),
-        "token without a session reference"
+        !check_session_active(None, &rid, &live),
+        "token without an epoch"
     );
     assert!(
-        !check_session_active(
-            Some(3),
-            &AccountState {
-                epoch: 3,
-                credential_present: false
-            }
-        ),
+        !check_session_active(Some(3), &None, &live),
+        "token without a registration ID"
+    );
+    let removed = AccountState {
+        epoch: 3,
+        registration: None,
+    };
+    assert!(
+        !check_session_active(Some(3), &rid, &removed),
         "passkey removed"
+    );
+    let re_registered = AccountState {
+        epoch: 3,
+        registration: Some(b"another registration".to_vec()),
+    };
+    assert!(
+        !check_session_active(Some(3), &rid, &re_registered),
+        "same credential ID registered again"
     );
 }
 
@@ -375,6 +388,7 @@ fn refresh_claims(key: &DpopKey, iat: u64, auth_time: u64, epoch: u64) -> Refres
         sid: b64::encode(&[3; 16]),
         auth_time,
         cid: b64::encode(b"credential"),
+        rid: b64::encode(b"registration"),
         epoch,
         cnf: Cnf { jkt: key.jkt() },
     }
@@ -406,7 +420,7 @@ fn refresh_flow_and_revocation_rules() {
         &v,
         &AccountState {
             epoch: 4,
-            credential_present: true,
+            registration: Some(b"registration".to_vec()),
         },
     )
     .unwrap();
@@ -418,7 +432,7 @@ fn refresh_flow_and_revocation_rules() {
             &v,
             &AccountState {
                 epoch: 5,
-                credential_present: true
+                registration: Some(b"registration".to_vec()),
             }
         )
         .err(),
@@ -429,7 +443,19 @@ fn refresh_flow_and_revocation_rules() {
             &v,
             &AccountState {
                 epoch: 4,
-                credential_present: false
+                registration: None,
+            }
+        )
+        .err(),
+        Some(Reject::SessionCredentialRevoked)
+    );
+    // The same credential ID registered again has a new registration ID.
+    assert_eq!(
+        authorize_refresh(
+            &v,
+            &AccountState {
+                epoch: 4,
+                registration: Some(b"re-registered".to_vec()),
             }
         )
         .err(),

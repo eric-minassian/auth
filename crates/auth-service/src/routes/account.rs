@@ -2,12 +2,12 @@
 //! access token for audience = issuer plus a DPoP proof (nonce required,
 //! single-use `jti`), via the formally verified resource check.
 
-use super::{new_recovery_code, webauthn_error};
+use super::{new_recovery_code, new_registration_id, webauthn_error};
 use crate::error::ApiError;
 use crate::http;
 use crate::options;
 use crate::state::AppState;
-use crate::store::{AddError, Ceremony, CeremonyKind, CredentialRecord, RemoveError};
+use crate::store::{AddError, Ceremony, CeremonyKind, CredentialRecord, NewPasskey, RemoveError};
 use auth_core::b64;
 use auth_core::decide::{self, AccountState, CEREMONY_TTL, MAX_PASSKEYS_PER_ACCOUNT};
 use auth_core::webauthn::{self, RegistrationResponseJson};
@@ -44,12 +44,14 @@ impl FromRequestParts<AppState> for Caller {
 }
 
 /// Revocation takes effect immediately at the account API: the session's
-/// passkey must still be registered and the account epoch unchanged
-/// (strongly consistent reads), not merely the access token unexpired.
+/// passkey must still be registered with the same registration ID and the
+/// account epoch unchanged (strongly consistent reads), not merely the access
+/// token unexpired.
 async fn require_active_session(state: &AppState, id: &Identity) -> Result<(), ApiError> {
     let revoked = || ApiError::Verify(VerifyError::InvalidToken { reason: None });
     let session = id.session.as_ref().ok_or_else(revoked)?;
     let credential_id = b64::decode_str(&session.credential_id).ok_or_else(revoked)?;
+    let registration_id = b64::decode_str(&session.registration_id).ok_or_else(revoked)?;
     let (meta, credential) = tokio::try_join!(
         state.store.get_meta(&id.subject),
         state.store.get_credential(&id.subject, &credential_id),
@@ -59,9 +61,9 @@ async fn require_active_session(state: &AppState, id: &Identity) -> Result<(), A
     };
     let account = AccountState {
         epoch: meta.epoch,
-        credential_present: credential.is_some(),
+        registration: credential.map(|c| c.registration_id),
     };
-    if decide::check_session_active(Some(session.epoch), &account) {
+    if decide::check_session_active(Some(session.epoch), &Some(registration_id), &account) {
         Ok(())
     } else {
         Err(revoked())
@@ -71,6 +73,12 @@ async fn require_active_session(state: &AppState, id: &Identity) -> Result<(), A
 fn step_up(state: &AppState, id: &Identity) -> Result<(), ApiError> {
     id.require_recent_authentication(state.clock.now())
         .map_err(ApiError::from)
+}
+
+/// The caller's DPoP key thumbprint as bytes.
+fn key_thumbprint(id: &Identity) -> Result<Vec<u8>, ApiError> {
+    b64::decode_str(&id.key_thumbprint)
+        .ok_or(ApiError::Verify(VerifyError::InvalidToken { reason: None }))
 }
 
 fn account_bytes(id: &Identity) -> Result<[u8; 16], ApiError> {
@@ -128,6 +136,7 @@ pub async fn passkey_options(
 ) -> Result<Json<Value>, ApiError> {
     step_up(&state, &id)?;
     let account = account_bytes(&id)?;
+    let jkt = key_thumbprint(&id)?;
     let (_, creds) = state
         .store
         .list_account(&id.subject)
@@ -143,6 +152,8 @@ pub async fn passkey_options(
                 kind: CeremonyKind::AddPasskey,
                 account_id: Some(id.subject.clone()),
                 recovery_key: None,
+                // Bound to the caller's device key (protocol §8).
+                jkt,
                 expires_at: now + CEREMONY_TTL,
             },
         )
@@ -178,16 +189,26 @@ pub async fn passkey_verify(
         .ok_or_else(|| ApiError::InvalidGrant("unknown or used challenge".into()))?;
     let matches = ceremony.kind == CeremonyKind::AddPasskey
         && ceremony.account_id.as_deref() == Some(id.subject.as_str());
-    if !decide::check_ceremony(matches, ceremony.expires_at, now) {
+    let jkt = key_thumbprint(&id)?;
+    if !decide::check_ceremony(matches, &ceremony.jkt, &jkt, ceremony.expires_at, now) {
         return Err(ApiError::InvalidGrant(
             "challenge expired or for another ceremony".into(),
         ));
     }
     let cred = webauthn::verify_registration(&state.rp, &challenge, &req.credential)
         .map_err(webauthn_error)?;
+    let registration_id = new_registration_id()?;
     match state
         .store
-        .add_credential(&id.subject, &cred, MAX_PASSKEYS_PER_ACCOUNT, now)
+        .add_credential(
+            &id.subject,
+            NewPasskey {
+                credential: &cred,
+                registration_id: &registration_id,
+            },
+            MAX_PASSKEYS_PER_ACCOUNT,
+            now,
+        )
         .await?
     {
         Ok(()) => {}

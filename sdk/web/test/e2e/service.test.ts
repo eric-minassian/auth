@@ -157,12 +157,19 @@ describe.skipIf(issuer === '')('SDK against the real service', () => {
 
   it('signals an unknown passkey so the provider stops offering it', async () => {
     const { authenticator } = provider();
-    // A passkey the server never stored (for example from an abandoned sign-up).
-    const res = await fetch(`${issuer}/v1/register/options`, { method: 'POST' });
-    const { publicKey } = (await res.json()) as { publicKey: unknown };
-    await navigator.credentials.create({
-      publicKey: toCreationOptions(parseCreationOptionsJSON(publicKey)),
+    // A passkey for this RP that the server never stored (for example from an
+    // abandoned sign-up). The authenticator does not involve the server.
+    const randomB64 = (n: number): string =>
+      Buffer.from(crypto.getRandomValues(new Uint8Array(n))).toString('base64url');
+    const options = parseCreationOptionsJSON({
+      rp: { id: new URL(origin).hostname, name: 'Orphan' },
+      user: { id: randomB64(16), name: 'orphan', displayName: 'orphan' },
+      challenge: randomB64(32),
+      pubKeyCredParams: [{ type: 'public-key', alg: -7 }],
+      authenticatorSelection: { residentKey: 'required', userVerification: 'required' },
+      attestation: 'none',
     });
+    await navigator.credentials.create({ publicKey: toCreationOptions(options) });
     expect(authenticator.credentials).toHaveLength(1);
 
     expect(await errorCode(device().signIn())).toBe('unknown_credential');

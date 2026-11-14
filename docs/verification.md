@@ -27,10 +27,11 @@ service and resource servers make:
 | `check_dpop` | `dpop_ok`: compact JWS, `alg = ES256`, `typ = dpop+jwt`, no forbidden headers, public P-256 `jwk` without private members, valid signature by that key, `jti` length, exact `htm`/`htu`, `iat` window, nonce (when required), `ath` = SHA-256 of the presented access token and absent otherwise | §7 |
 | `check_resource_request` | access token valid (`at+jwt`, ES256, `kid` of a trusted key, valid signature, issuer, audience, unexpired, not issued in the future, lifetime ≤ 300 s, `auth_time ≤ iat`) **and** DPoP proof valid for this token **and** `cnf.jkt` = proof key thumbprint | §6.1, §7 |
 | `check_refresh_token` | `refresh_token_ok`: `rt+jwt`, ES256, trusted `kid`, valid signature, issuer and audience, client, unexpired, not issued in the future, `exp ≤ auth_time + 1 year`, `cnf.jkt` = proof key | §6.2 rules 1–4 |
-| `authorize_refresh` | `refresh_authorized`: passkey still registered, epoch unchanged, session extendable | §6.2 rules 5–6 |
+| `authorize_refresh` | `refresh_authorized`: the passkey is still registered **with the token's registration ID** (so re-registering a removed credential never revives its sessions), epoch unchanged, session extendable | §6.2 rules 5–6 |
 | `lifetimes` | access token lives exactly 300 s; refresh expiry is `min(now + 30 d, auth_time + 365 d)` and strictly after `now` | §6 |
-| `check_session_active` | `session_active`: the token carries an epoch equal to the account's and its passkey is still registered (immediate revocation at the account API) | §10.7 |
-| `check_step_up`, `check_ceremony`, `nonce_windows` | step-up age, ceremony kind and expiry, valid nonce windows | §7.2, §10.7 |
+| `check_session_active` | `session_active`: the token carries an epoch equal to the account's and the registration ID its passkey is still registered with (immediate revocation at the account API) | §10.7 |
+| `check_ceremony` | `ceremony_ok`: the challenge's kind matches, it is bound to the **same device key** that signs the verify request, and it has not expired | §8 |
+| `check_step_up`, `nonce_windows` | step-up age, valid nonce windows | §7.2, §10.7 |
 
 Properties worth calling out:
 

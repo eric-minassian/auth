@@ -1,10 +1,13 @@
 //! Sign-up (protocol §10.3).
 
-use super::{VerifyBody, client_and_audience, new_recovery_code, new_sid, webauthn_error};
+use super::{
+    VerifyBody, client_and_audience, new_recovery_code, new_registration_id, new_sid,
+    webauthn_error,
+};
 use crate::error::ApiError;
 use crate::http;
 use crate::state::AppState;
-use crate::store::{Ceremony, CeremonyKind, StoreError};
+use crate::store::{Ceremony, CeremonyKind, NewPasskey, StoreError};
 use crate::tokens::{self, Session};
 use crate::{dpop, options};
 use auth_core::b64;
@@ -25,6 +28,8 @@ pub async fn options(
 ) -> Result<Json<Value>, ApiError> {
     let _: serde_json::Map<String, Value> = http::json(&headers, body)?;
     let now = state.clock.now();
+    // Bind the ceremony to the device key that asks for it (protocol §8).
+    let proof = dpop::require_proof(&state, &headers, "POST", "/v1/register/options", now).await?;
     let account_id = crate::random::bytes::<16>()?;
     let challenge = crate::random::bytes::<32>()?;
     state
@@ -35,6 +40,7 @@ pub async fn options(
                 kind: CeremonyKind::Register,
                 account_id: Some(b64::encode(&account_id)),
                 recovery_key: None,
+                jkt: proof.jkt,
                 expires_at: now + CEREMONY_TTL,
             },
         )
@@ -65,6 +71,8 @@ pub async fn verify(
         .ok_or_else(|| ApiError::InvalidGrant("unknown or used challenge".into()))?;
     if !decide::check_ceremony(
         ceremony.kind == CeremonyKind::Register,
+        &ceremony.jkt,
+        &proof.jkt,
         ceremony.expires_at,
         now,
     ) {
@@ -79,9 +87,18 @@ pub async fn verify(
     let cred = webauthn::verify_registration(&state.rp, &challenge, &req.credential)
         .map_err(webauthn_error)?;
     let (recovery_code, recovery_key) = new_recovery_code()?;
+    let registration_id = new_registration_id()?;
     match state
         .store
-        .create_account(&account_id, &cred, &recovery_key, now)
+        .create_account(
+            &account_id,
+            NewPasskey {
+                credential: &cred,
+                registration_id: &registration_id,
+            },
+            &recovery_key,
+            now,
+        )
         .await
     {
         Ok(()) => {}
@@ -102,6 +119,7 @@ pub async fn verify(
         sid: new_sid()?,
         auth_time: now,
         cid: b64::encode(&cred.credential_id),
+        rid: b64::encode(&registration_id),
         epoch: 0,
         jkt: b64::encode(&proof.jkt),
     };

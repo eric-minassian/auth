@@ -43,6 +43,8 @@ type ChallengeKind = 'register' | 'login' | 'recover' | 'add_passkey';
 interface ChallengeRecord {
   readonly kind: ChallengeKind;
   readonly accountId?: string;
+  /** Thumbprint of the device key the ceremony is bound to (protocol §8). */
+  readonly jkt: string;
   readonly expiresAt: number;
 }
 
@@ -527,6 +529,16 @@ export class FakeAuthServer {
     path: string,
     stepUp: boolean,
   ): Promise<AccountRecord | Response> {
+    const result = await this.#accountWithKey(request, path, stepUp);
+    return result instanceof Response ? result : result.account;
+  }
+
+  /** Like `#account`, also returning the caller's DPoP key thumbprint. */
+  async #accountWithKey(
+    request: Request,
+    path: string,
+    stepUp: boolean,
+  ): Promise<{ account: AccountRecord; jkt: string } | Response> {
     const result = await this.#authenticate(request, {
       audience: this.issuer,
       htu: this.issuer + path,
@@ -538,14 +550,21 @@ export class FakeAuthServer {
     if (result instanceof Response) return result;
     if (result.account === undefined)
       return this.#challenge('invalid_token', 'no such account', false);
-    return result.account;
+    const cnf = result.claims['cnf'];
+    const jkt = isObject(cnf) && typeof cnf['jkt'] === 'string' ? cnf['jkt'] : '';
+    return { account: result.account, jkt };
   }
 
   // -------------------------------------------------------------------------
   // WebAuthn verification
   // -------------------------------------------------------------------------
 
-  #consumeChallenge(clientData: Json, expectedType: string, kind: ChallengeKind): ChallengeRecord {
+  #consumeChallenge(
+    clientData: Json,
+    expectedType: string,
+    kind: ChallengeKind,
+    jkt: string,
+  ): ChallengeRecord {
     if (clientData['type'] !== expectedType)
       throw new Reject(400, 'webauthn_rejected', 'clientData.type');
     const challenge = clientData['challenge'];
@@ -556,6 +575,9 @@ export class FakeAuthServer {
     this.#challenges.delete(challenge); // single use, consumed before verification
     if (record.kind !== kind || record.expiresAt <= this.now()) {
       throw new Reject(400, 'invalid_grant', 'challenge expired or of the wrong kind');
+    }
+    if (record.jkt !== jkt) {
+      throw new Reject(400, 'invalid_grant', 'challenge bound to another device key');
     }
     if (typeof clientData['origin'] !== 'string' || !this.origins.includes(clientData['origin'])) {
       throw new Reject(400, 'webauthn_rejected', 'origin not allowed');
@@ -610,10 +632,11 @@ export class FakeAuthServer {
   async #verifyRegistration(
     credential: unknown,
     kind: ChallengeKind,
+    jkt: string,
   ): Promise<{ challenge: ChallengeRecord; record: CredentialRecord }> {
     const { response, rawId } = FakeAuthServer.#credentialEnvelope(credential);
     const clientData = FakeAuthServer.#clientData(response);
-    const challenge = this.#consumeChallenge(clientData.json, 'webauthn.create', kind);
+    const challenge = this.#consumeChallenge(clientData.json, 'webauthn.create', kind, jkt);
     let attestation: ReturnType<typeof parseAttestationObject>;
     let authData: ReturnType<typeof parseAuthenticatorData>;
     try {
@@ -760,10 +783,11 @@ export class FakeAuthServer {
     };
   }
 
-  #newChallenge(kind: ChallengeKind, accountId?: string): string {
+  #newChallenge(kind: ChallengeKind, jkt: string, accountId?: string): string {
     const challenge = randomB64(32);
     this.#challenges.set(challenge, {
       kind,
+      jkt,
       ...(accountId === undefined ? {} : { accountId }),
       expiresAt: this.now() + CEREMONY_TTL,
     });
@@ -812,8 +836,9 @@ export class FakeAuthServer {
       }
       case 'POST /v1/register/options': {
         FakeAuthServer.#jsonBody(request, body);
+        const jkt = await this.#tokenProof(request, path);
         const accountId = randomB64(16);
-        const challenge = this.#newChallenge('register', accountId);
+        const challenge = this.#newChallenge('register', jkt, accountId);
         return this.#json(200, { publicKey: this.#creationOptions(accountId, challenge, []) });
       }
       case 'POST /v1/register/verify': {
@@ -824,6 +849,7 @@ export class FakeAuthServer {
         const { challenge, record } = await this.#verifyRegistration(
           json['credential'],
           'register',
+          jkt,
         );
         const accountId = challenge.accountId ?? '';
         const account: AccountRecord = {
@@ -849,7 +875,8 @@ export class FakeAuthServer {
       }
       case 'POST /v1/login/options': {
         FakeAuthServer.#jsonBody(request, body);
-        const challenge = this.#newChallenge('login');
+        const jkt = await this.#tokenProof(request, path);
+        const challenge = this.#newChallenge('login', jkt);
         return this.#json(200, {
           publicKey: {
             challenge,
@@ -874,7 +901,8 @@ export class FakeAuthServer {
           (a) => code !== undefined && a.recoveryCode === code,
         );
         if (account === undefined) throw new Reject(400, 'invalid_grant', 'unknown recovery code');
-        const challenge = this.#newChallenge('recover', account.id);
+        const jkt = await this.#tokenProof(request, path);
+        const challenge = this.#newChallenge('recover', jkt, account.id);
         return this.#json(200, { publicKey: this.#creationOptions(account.id, challenge, []) });
       }
       case 'POST /v1/recover/verify': {
@@ -882,7 +910,11 @@ export class FakeAuthServer {
         const jkt = await this.#tokenProof(request, path);
         const clientId = this.#checkClient(json['client_id']);
         const resource = this.#checkResource(json['resource']);
-        const { challenge, record } = await this.#verifyRegistration(json['credential'], 'recover');
+        const { challenge, record } = await this.#verifyRegistration(
+          json['credential'],
+          'recover',
+          jkt,
+        );
         const account = this.accounts.get(challenge.accountId ?? '');
         if (account === undefined) throw new Reject(400, 'invalid_grant', 'account gone');
         for (const id of account.credentials.keys()) this.#credentialIndex.delete(id);
@@ -910,21 +942,24 @@ export class FakeAuthServer {
         });
       }
       case 'POST /v1/account/passkeys/options': {
-        const account = await this.#account(request, path, true);
-        if (account instanceof Response) return account;
+        const caller = await this.#accountWithKey(request, path, true);
+        if (caller instanceof Response) return caller;
+        const { account, jkt } = caller;
         FakeAuthServer.#jsonBody(request, body);
-        const challenge = this.#newChallenge('add_passkey', account.id);
+        const challenge = this.#newChallenge('add_passkey', jkt, account.id);
         return this.#json(200, {
           publicKey: this.#creationOptions(account.id, challenge, [...account.credentials.keys()]),
         });
       }
       case 'POST /v1/account/passkeys/verify': {
-        const account = await this.#account(request, path, true);
-        if (account instanceof Response) return account;
+        const caller = await this.#accountWithKey(request, path, true);
+        if (caller instanceof Response) return caller;
+        const { account, jkt } = caller;
         const json = FakeAuthServer.#jsonBody(request, body);
         const { challenge, record } = await this.#verifyRegistration(
           json['credential'],
           'add_passkey',
+          jkt,
         );
         if (challenge.accountId !== account.id)
           throw new Reject(400, 'invalid_grant', 'challenge for another account');
@@ -976,7 +1011,7 @@ export class FakeAuthServer {
     const resource = this.#checkResource(json['resource']);
     const { response, rawId } = FakeAuthServer.#credentialEnvelope(json['credential']);
     const clientData = FakeAuthServer.#clientData(response);
-    this.#consumeChallenge(clientData.json, 'webauthn.get', 'login');
+    this.#consumeChallenge(clientData.json, 'webauthn.get', 'login', jkt);
     const authDataBytes = FakeAuthServer.#b64(response, 'authenticatorData');
     let authData: ReturnType<typeof parseAuthenticatorData>;
     try {

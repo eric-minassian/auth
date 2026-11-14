@@ -30,6 +30,9 @@
 | Stolen access or refresh token (network, logs, infostealer) | Every token is DPoP-bound (`cnf.jkt`); requests need a fresh proof signed by a non-extractable device key | §6, §7; verified `check_resource_request`, `check_refresh_token`; Tamarin token-theft lemma |
 | Replayed DPoP proof | Server nonces (current and previous 5-minute window), `iat` window, single-use `jti` at the auth service, optional replay cache at resource servers | §7.2–7.3 |
 | Replayed WebAuthn response | 32-byte single-use challenges, consumed with a conditional delete before verification and expiring after 5 minutes | §8; Tamarin injective-agreement lemma |
+| WebAuthn response captured in transit and redeemed with the attacker's key | Every ceremony is bound to the DPoP key that requested its options; verify must be signed by that key | §8; verified `check_ceremony`; Tamarin (found by the model, then fixed) |
+| Re-registering a removed passkey's credential ID to revive its sessions | Every registration gets a fresh registration ID carried in tokens; refresh and the account API compare it | §6.2 rule 5; verified `authorize_refresh`, `check_session_active`; Tamarin (found by the model, then fixed) |
+| Hostile page under the RP ID planting a passkey for the attacker's account | Deployment requirement: the RP ID is the narrowest domain covering the app, and every host under it is operator-controlled | §8 "RP ID scope"; Tamarin attack witness (`-D=ATTACKS`) |
 | Cloned authenticator | Signature counter must strictly increase unless it is always zero (synced passkeys) | §8; verified `sign_count_ok` |
 | Token confusion (refresh as access, DPoP proof as token) | Explicit `typ` per token kind, separate signing keys, refresh key never published | §5; verified header checks |
 | Algorithm confusion, `alg: none`, embedded or remote keys | Only `ES256`; `jku`/`x5u`/`x5c`/`crit`/`b64` rejected; issued tokens may not carry `jwk` | §5; verified `issued_header_ok`, `dpop_header_ok` |
@@ -60,4 +63,12 @@
 4. **XSS on the app origin** can act as the user while the page is open.
 5. **Pseudonymous, not unlinkable.** The account ID is stable, so the app can
    link a user's actions to each other. That is inherent to accounts.
-6. **The AWS account and its operators** are trusted.
+6. **The AWS account and its operators** are trusted. In particular, anyone
+   able to sign with the refresh-token KMS key could mint sessions; forging one
+   for a victim also requires the victim's current epoch, a credential ID and
+   its secret registration ID. KMS key policies grant `Sign` to the service role
+   only.
+7. **RP ID scope.** If a host under `AUTH_RP_ID` is not under the operator's
+   control, a page there can plant a passkey for an attacker's account (see
+   protocol §8). The configuration cannot detect this; it is a deployment
+   requirement.

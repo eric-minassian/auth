@@ -966,6 +966,8 @@ pub struct Identity {
     pub dpop_jti: Vec<u8>,
     /// The passkey that started the session (`cid`), if the token carries it.
     pub cid: Option<Vec<u8>>,
+    /// The registration ID of that passkey (`rid`), if the token carries it.
+    pub rid: Option<Vec<u8>>,
     /// The session's epoch (`epoch`), if the token carries it.
     pub epoch: Option<u64>,
 }
@@ -985,6 +987,7 @@ pub fn check_resource_request(token: &[u8], proof: &[u8], a: &AccessExpect, d: &
             && id.auth_time == access_claims_of(token@).auth_time
             && id.jkt@ == dpop_jkt(proof@)
             && opt_view(id.cid) == access_claims_of(token@).cid
+            && opt_view(id.rid) == access_claims_of(token@).rid
             && id.epoch == access_claims_of(token@).epoch,
 {
     match &d.access_token {
@@ -1014,6 +1017,7 @@ pub fn check_resource_request(token: &[u8], proof: &[u8], a: &AccessExpect, d: &
         jkt: p.jkt,
         dpop_jti: p.jti,
         cid: c.cid,
+        rid: c.rid,
         epoch: c.epoch,
     })
 }
@@ -1130,8 +1134,9 @@ pub fn check_refresh_token(raw: &[u8], e: &RefreshExpect, dpop_jkt: &[u8]) -> (r
 pub struct AccountState {
     /// The account's current session epoch.
     pub epoch: u64,
-    /// Whether the passkey `cid` is still registered on the account.
-    pub credential_present: bool,
+    /// The registration ID stored for the passkey `cid`, or `None` if that
+    /// passkey is no longer registered on the account.
+    pub registration: Option<Vec<u8>>,
 }
 
 /// Lifetimes of the tokens issued on a successful sign-in or refresh.
@@ -1187,7 +1192,7 @@ pub fn lifetimes(now: u64, auth_time: u64) -> (r: Result<Lifetimes, Reject>)
 
 /// The stateful refresh rules (protocol §6.2 rules 5–6) plus lifetimes.
 pub open spec fn refresh_authorized(c: RefreshClaimsV, s: AccountState, now: u64) -> bool {
-    &&& s.credential_present
+    &&& opt_view(s.registration) == Some(c.rid)
     &&& s.epoch == c.epoch
     &&& lifetimes_ok(now, c.auth_time)
 }
@@ -1200,8 +1205,13 @@ pub fn authorize_refresh(v: &VerifiedRefresh, s: &AccountState) -> (r: Result<Li
             && l.refresh_exp as int == next_refresh_exp(v.spec_now(), v.spec_claims().auth_time)
             && l.refresh_exp as int <= v.spec_claims().auth_time as int + REFRESH_ABSOLUTE_TTL as int,
 {
-    if !s.credential_present {
-        return Err(Reject::SessionCredentialRevoked);
+    match &s.registration {
+        Some(stored) => {
+            if !bytes_eq(stored.as_slice(), v.claims.rid.as_slice()) {
+                return Err(Reject::SessionCredentialRevoked);
+            }
+        }
+        None => return Err(Reject::SessionCredentialRevoked),
     }
     if s.epoch != v.claims.epoch {
         return Err(Reject::SessionEpochMismatch);
@@ -1212,20 +1222,28 @@ pub fn authorize_refresh(v: &VerifiedRefresh, s: &AccountState) -> (r: Result<Li
 // =================================================================== small rules
 
 /// A session is still active iff it carries a session reference, its passkey
-/// is still registered and the account's epoch is unchanged (protocol §10.7).
-/// Used by the account API so revocation takes effect there immediately rather
-/// than when access tokens expire.
-pub open spec fn session_active(epoch: Option<u64>, s: AccountState) -> bool {
+/// is still registered with the same registration ID, and the account's epoch
+/// is unchanged (protocol §10.7). Used by the account API so revocation takes
+/// effect there immediately rather than when access tokens expire.
+pub open spec fn session_active(epoch: Option<u64>, rid: Option<Seq<u8>>, s: AccountState) -> bool {
     &&& epoch matches Some(e) && e == s.epoch
-    &&& s.credential_present
+    &&& rid is Some
+    &&& opt_view(s.registration) == rid
 }
 
-pub fn check_session_active(epoch: Option<u64>, s: &AccountState) -> (r: bool)
-    ensures r == session_active(epoch, *s),
+pub fn check_session_active(epoch: Option<u64>, rid: &Option<Vec<u8>>, s: &AccountState) -> (r: bool)
+    ensures r == session_active(epoch, opt_view(*rid), *s),
 {
-    match epoch {
-        Some(e) => e == s.epoch && s.credential_present,
+    let epoch_ok = match epoch {
+        Some(e) => e == s.epoch,
         None => false,
+    };
+    if !epoch_ok {
+        return false;
+    }
+    match (rid, &s.registration) {
+        (Some(r), Some(stored)) => bytes_eq(r.as_slice(), stored.as_slice()),
+        _ => false,
     }
 }
 
@@ -1241,16 +1259,20 @@ pub fn check_step_up(auth_time: u64, now: u64) -> (r: bool)
     auth_time <= now && now - auth_time <= STEP_UP_MAX_AGE
 }
 
-/// A stored ceremony (challenge) is usable iff its kind matches and it has not
-/// expired. DynamoDB deletes expired items lazily, so expiry is always checked.
-pub open spec fn ceremony_ok(kind_matches: bool, expires_at: u64, now: u64) -> bool {
-    kind_matches && now < expires_at
+/// A stored ceremony (challenge) is usable iff its kind matches, the request
+/// is signed by the device key the ceremony was bound to at the options step
+/// (protocol §8), and it has not expired. DynamoDB deletes expired items
+/// lazily, so expiry is always checked.
+pub open spec fn ceremony_ok(kind_matches: bool, bound_jkt: Seq<u8>, proof_jkt: Seq<u8>, expires_at: u64, now: u64) -> bool {
+    &&& kind_matches
+    &&& bound_jkt == proof_jkt
+    &&& now < expires_at
 }
 
-pub fn check_ceremony(kind_matches: bool, expires_at: u64, now: u64) -> (r: bool)
-    ensures r == ceremony_ok(kind_matches, expires_at, now),
+pub fn check_ceremony(kind_matches: bool, bound_jkt: &[u8], proof_jkt: &[u8], expires_at: u64, now: u64) -> (r: bool)
+    ensures r == ceremony_ok(kind_matches, bound_jkt@, proof_jkt@, expires_at, now),
 {
-    kind_matches && now < expires_at
+    kind_matches && bytes_eq(bound_jkt, proof_jkt) && now < expires_at
 }
 
 /// The DPoP nonce windows that are currently valid: the current one and, if it

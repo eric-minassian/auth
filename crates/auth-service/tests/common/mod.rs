@@ -348,7 +348,7 @@ impl<'a> Client<'a> {
     /// Sign-up with a software passkey.
     pub async fn sign_up(&mut self, auth: &mut SoftAuthenticator) -> (Tokens, String, String) {
         let opts = self
-            .post("/v1/register/options", &json!({}), false, None)
+            .post("/v1/register/options", &json!({}), true, None)
             .await;
         assert_eq!(opts.status, StatusCode::OK, "{opts:?}");
         let r = self
@@ -379,9 +379,7 @@ impl<'a> Client<'a> {
 
     /// Sign-in with a software passkey.
     pub async fn sign_in(&mut self, auth: &mut SoftAuthenticator) -> Resp {
-        let opts = self
-            .post("/v1/login/options", &json!({}), false, None)
-            .await;
+        let opts = self.post("/v1/login/options", &json!({}), true, None).await;
         assert_eq!(opts.status, StatusCode::OK, "{opts:?}");
         let challenge =
             b64::decode_str(opts.json["publicKey"]["challenge"].as_str().unwrap()).unwrap();

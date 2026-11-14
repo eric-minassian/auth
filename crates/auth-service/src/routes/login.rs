@@ -25,6 +25,8 @@ pub async fn options(
 ) -> Result<Json<Value>, ApiError> {
     let _: serde_json::Map<String, Value> = http::json(&headers, body)?;
     let now = state.clock.now();
+    // Bind the ceremony to the device key that asks for it (protocol §8).
+    let proof = dpop::require_proof(&state, &headers, "POST", "/v1/login/options", now).await?;
     let challenge = crate::random::bytes::<32>()?;
     state
         .store
@@ -34,6 +36,7 @@ pub async fn options(
                 kind: CeremonyKind::Login,
                 account_id: None,
                 recovery_key: None,
+                jkt: proof.jkt,
                 expires_at: now + CEREMONY_TTL,
             },
         )
@@ -70,6 +73,8 @@ pub async fn verify(
         .ok_or_else(|| ApiError::InvalidGrant("unknown or used challenge".into()))?;
     if !decide::check_ceremony(
         ceremony.kind == CeremonyKind::Login,
+        &ceremony.jkt,
+        &proof.jkt,
         ceremony.expires_at,
         now,
     ) {
@@ -125,6 +130,7 @@ pub async fn verify(
         sid: new_sid()?,
         auth_time: now,
         cid: b64::encode(&credential_id),
+        rid: b64::encode(&stored.registration_id),
         epoch: meta.epoch,
         jkt: b64::encode(&proof.jkt),
     };

@@ -65,7 +65,7 @@ async fn discovery_documents() {
 async fn every_response_has_security_headers_and_a_nonce() {
     let env = env_or_skip!();
     let mut c = Client::new(&env);
-    let r = c.post("/v1/login/options", &json!({}), false, None).await;
+    let r = c.post("/v1/login/options", &json!({}), true, None).await;
     for h in [
         "dpop-nonce",
         "date",
@@ -180,10 +180,26 @@ async fn dpop_is_enforced_at_token_endpoints() {
     c.auto_retry_nonce = false;
     let mut passkey = SoftAuthenticator::new();
 
-    // No nonce yet: the server asks for one and the client retries.
-    let opts = c
-        .post("/v1/register/options", &json!({}), false, None)
+    // Options requests need a proof too (they bind the ceremony to the key),
+    // and without a nonce the server asks for one.
+    let r = c
+        .request(
+            Method::POST,
+            "/v1/register/options",
+            Some(&json!({})),
+            false,
+            None,
+        )
         .await;
+    assert_eq!(r.error(), "invalid_dpop_proof");
+    // Every response carries a fresh nonce; drop it to exercise the retry.
+    c.nonce = None;
+    let r = c.post("/v1/register/options", &json!({}), true, None).await;
+    assert_eq!(r.error(), "use_dpop_nonce");
+    let opts = c.post("/v1/register/options", &json!({}), true, None).await;
+    assert_eq!(opts.status, StatusCode::OK, "{opts:?}");
+
+    // No valid nonce at verify: the server asks for one and the client retries.
     c.nonce = None;
     let r = c
         .complete_registration(&mut passkey, &opts.json, "/v1/register/verify")
@@ -250,14 +266,45 @@ async fn dpop_is_enforced_at_token_endpoints() {
 }
 
 #[tokio::test]
+async fn ceremonies_are_bound_to_the_requesting_device_key() {
+    let env = env_or_skip!();
+    let mut device = Client::new(&env);
+    device.prime_nonce().await;
+    let mut passkey = SoftAuthenticator::new();
+    device.sign_up(&mut passkey).await;
+
+    // The device starts a sign-in; an attacker who captures the passkey
+    // response cannot redeem it with their own key.
+    let opts = device
+        .post("/v1/login/options", &json!({}), true, None)
+        .await;
+    let challenge = b64::decode_str(opts.json["publicKey"]["challenge"].as_str().unwrap()).unwrap();
+    let captured = passkey.authenticate(RP_ID, ORIGIN, &challenge);
+    let body = json!({ "client_id": "web", "credential": captured });
+    let mut attacker = Client::new(&env);
+    attacker.prime_nonce().await;
+    let r = attacker.post("/v1/login/verify", &body, true, None).await;
+    assert_eq!(r.error(), "invalid_grant", "{r:?}");
+
+    // The same holds for sign-up: the registration is bound to the key that
+    // asked for the options.
+    let opts = device
+        .post("/v1/register/options", &json!({}), true, None)
+        .await;
+    let mut other = SoftAuthenticator::new();
+    let r = attacker
+        .complete_registration(&mut other, &opts.json, "/v1/register/verify")
+        .await;
+    assert_eq!(r.error(), "invalid_grant", "{r:?}");
+}
+
+#[tokio::test]
 async fn ceremonies_are_single_use_and_expire() {
     let env = env_or_skip!();
     let mut c = Client::new(&env);
     c.prime_nonce().await;
     let mut passkey = SoftAuthenticator::new();
-    let opts = c
-        .post("/v1/register/options", &json!({}), false, None)
-        .await;
+    let opts = c.post("/v1/register/options", &json!({}), true, None).await;
     let pk = &opts.json["publicKey"];
     let challenge = b64::decode_str(pk["challenge"].as_str().unwrap()).unwrap();
     let user = b64::decode_str(pk["user"]["id"].as_str().unwrap()).unwrap();
@@ -273,7 +320,7 @@ async fn ceremonies_are_single_use_and_expire() {
     assert_eq!(again.error(), "invalid_grant");
 
     // An expired sign-in challenge.
-    let opts = c.post("/v1/login/options", &json!({}), false, None).await;
+    let opts = c.post("/v1/login/options", &json!({}), true, None).await;
     let challenge = b64::decode_str(opts.json["publicKey"]["challenge"].as_str().unwrap()).unwrap();
     let assertion = passkey.authenticate(RP_ID, ORIGIN, &challenge);
     env.clock.advance(CEREMONY_TTL);
@@ -289,7 +336,7 @@ async fn ceremonies_are_single_use_and_expire() {
     assert_eq!(r.error(), "invalid_grant");
 
     // A sign-in challenge cannot complete a sign-up.
-    let opts = c.post("/v1/login/options", &json!({}), false, None).await;
+    let opts = c.post("/v1/login/options", &json!({}), true, None).await;
     let challenge = b64::decode_str(opts.json["publicKey"]["challenge"].as_str().unwrap()).unwrap();
     let mut other = SoftAuthenticator::new();
     let cred = other.register(RP_ID, ORIGIN, &challenge, &[1; 16]);
@@ -324,7 +371,7 @@ async fn sign_in_rejections() {
     // Phishing: an assertion made on another origin is rejected.
     let mut passkey = SoftAuthenticator::new();
     c.sign_up(&mut passkey).await;
-    let opts = c.post("/v1/login/options", &json!({}), false, None).await;
+    let opts = c.post("/v1/login/options", &json!({}), true, None).await;
     let challenge = b64::decode_str(opts.json["publicKey"]["challenge"].as_str().unwrap()).unwrap();
     let phished = passkey.authenticate(RP_ID, "https://app.test.example.evil.com", &challenge);
     let r = c
@@ -551,7 +598,7 @@ async fn recovery_replaces_passkeys_and_revokes_sessions() {
         .post(
             "/v1/recover/options",
             &json!({ "recovery_code": typed }),
-            false,
+            true,
             None,
         )
         .await;
@@ -592,7 +639,7 @@ async fn recovery_replaces_passkeys_and_revokes_sessions() {
         .post(
             "/v1/recover/options",
             &json!({ "recovery_code": code }),
-            false,
+            true,
             None,
         )
         .await;
@@ -609,7 +656,7 @@ async fn recovery_replaces_passkeys_and_revokes_sessions() {
         .post(
             "/v1/recover/options",
             &json!({ "recovery_code": new_code }),
-            false,
+            true,
             None,
         )
         .await;
@@ -618,7 +665,7 @@ async fn recovery_replaces_passkeys_and_revokes_sessions() {
         .post(
             "/v1/recover/options",
             &json!({ "recovery_code": "not a code" }),
-            false,
+            true,
             None,
         )
         .await;
@@ -646,7 +693,7 @@ async fn account_deletion_removes_everything() {
         .post(
             "/v1/recover/options",
             &json!({ "recovery_code": code }),
-            false,
+            true,
             None,
         )
         .await;
@@ -759,4 +806,67 @@ async fn body_limit_and_cors() {
     assert!(ok.headers.get("access-control-allow-credentials").is_none());
     let denied = c.send(preflight("https://evil.example")).await;
     assert!(denied.headers.get("access-control-allow-origin").is_none());
+}
+
+#[tokio::test]
+async fn re_registering_a_removed_passkey_does_not_revive_its_sessions() {
+    let env = env_or_skip!();
+    let mut phone = Client::new(&env);
+    phone.prime_nonce().await;
+    let mut first = SoftAuthenticator::new();
+    let (tokens, _, _) = phone.sign_up(&mut first).await;
+    let at = phone.account_token(&tokens).await;
+
+    // Add a security key and sign in with it on a laptop.
+    let mut security_key = SoftAuthenticator::new();
+    assert_eq!(
+        add_passkey(&mut phone, &mut security_key, &at).await.status,
+        StatusCode::CREATED
+    );
+    let mut laptop = Client::new(&env);
+    laptop.prime_nonce().await;
+    let laptop_tokens = laptop.sign_in_ok(&mut security_key).await;
+
+    // Remove it, then register the very same credential again.
+    let path = format!(
+        "/v1/account/passkeys/{}",
+        b64::encode(&security_key.credential_id)
+    );
+    let r = phone
+        .request(Method::DELETE, &path, None, true, Some(&at))
+        .await;
+    assert_eq!(r.status, StatusCode::NO_CONTENT, "{r:?}");
+    assert_eq!(
+        add_passkey(&mut phone, &mut security_key, &at).await.status,
+        StatusCode::CREATED
+    );
+
+    // The laptop's session started with the removed registration stays dead.
+    assert_eq!(
+        laptop
+            .refresh(&laptop_tokens.refresh_token, None)
+            .await
+            .error(),
+        "invalid_grant"
+    );
+    // Signing in again with the re-registered passkey works.
+    laptop.sign_in_ok(&mut security_key).await;
+}
+
+/// Adds a passkey through the account API.
+async fn add_passkey(c: &mut Client<'_>, key: &mut SoftAuthenticator, at: &str) -> common::Resp {
+    let opts = c
+        .post("/v1/account/passkeys/options", &json!({}), true, Some(at))
+        .await;
+    let pk = &opts.json["publicKey"];
+    let challenge = b64::decode_str(pk["challenge"].as_str().unwrap()).unwrap();
+    let user = b64::decode_str(pk["user"]["id"].as_str().unwrap()).unwrap();
+    let cred = key.register(RP_ID, ORIGIN, &challenge, &user);
+    c.post(
+        "/v1/account/passkeys/verify",
+        &json!({ "credential": cred }),
+        true,
+        Some(at),
+    )
+    .await
 }

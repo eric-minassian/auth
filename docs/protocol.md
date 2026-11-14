@@ -107,12 +107,13 @@ Header: `{"alg":"ES256","typ":"at+jwt","kid":"<jkt of the signing key>"}`
 | `cnf` | `{"jkt":"<device key thumbprint>"}` (RFC 9449 §6.1) |
 | `sid` | Session ID (as in the refresh token) |
 | `cid` | base64url credential ID of the passkey that started the session |
+| `rid` | base64url registration ID of that passkey (§8) |
 | `epoch` | The account's session epoch when the session started |
 
-`sid`, `cid` and `epoch` let a resource server check that the session is still
-active (the passkey `cid` is registered and the account epoch equals `epoch`)
-when it needs revocation to take effect immediately. The auth service's own
-account API always does (§10.7).
+`sid`, `cid`, `rid` and `epoch` let a resource server check that the session is
+still active (the passkey `cid` is registered with registration ID `rid` and the
+account epoch equals `epoch`) when it needs revocation to take effect
+immediately. The auth service's own account API always does (§10.7).
 
 ### 6.2 Refresh token
 
@@ -132,6 +133,7 @@ Header: `{"alg":"ES256","typ":"rt+jwt","kid":"<jkt of the refresh signing key>"}
 | `sid` | Session ID: 16 random bytes, constant for the life of the session |
 | `auth_time` | Time of the passkey ceremony that started the session |
 | `cid` | base64url credential ID of the passkey that started the session |
+| `rid` | base64url registration ID of that passkey (§8) |
 | `epoch` | The account's session epoch when the session started |
 | `cnf` | `{"jkt":"<device key thumbprint>"}` |
 
@@ -143,11 +145,14 @@ A refresh is accepted **only if all** of these hold:
    `client_id`.
 3. `now < exp` and `iat <= now + DPOP_MAX_IAT_SKEW_AUTH_SERVER`.
 4. A valid DPoP proof (§7) was presented whose key thumbprint equals `cnf.jkt`.
-5. The passkey `cid` still exists on the account (strongly consistent read).
+5. The passkey `cid` is still registered on the account **with registration ID
+   `rid`** (strongly consistent read). Registering the same credential ID again
+   creates a new registration ID, so it never revives sessions of a removed
+   passkey.
 6. `epoch` equals the account's current epoch (strongly consistent read).
 
 On success the service issues a new access token and a new refresh token with
-the same `sid`, `auth_time`, `cid`, `epoch` and `cnf`, and with
+the same `sid`, `auth_time`, `cid`, `rid`, `epoch` and `cnf`, and with
 `exp = min(now + REFRESH_IDLE_TTL, auth_time + REFRESH_ABSOLUTE_TTL)`. Old
 refresh tokens are not tracked; they remain usable until their own `exp`, but
 only by the holder of the device key.
@@ -158,7 +163,7 @@ only by the holder of the device key.
 |---|---|
 | Sign out (one device) | The client destroys its device key and tokens. Without the key, no DPoP proof can be produced, so the session is cryptographically dead. |
 | Sign out everywhere | The account's `epoch` is incremented. Every refresh token with an older epoch fails rule 6, and the account API rejects older sessions' access tokens at once. Elsewhere, access tokens already issued expire within `ACCESS_TOKEN_TTL` unless the resource server checks `cid`/`epoch`. |
-| Passkey removed | Refresh tokens whose `cid` is that passkey fail rule 5. |
+| Passkey removed | Sessions started with that passkey fail rule 5 (and the account API check), even if the same credential ID is registered again later. |
 | Account recovered | `epoch` incremented and all passkeys replaced. |
 | Account deleted | All rules fail. |
 
@@ -200,7 +205,7 @@ membership). Rotating `K_nonce` invalidates outstanding nonces; clients recover
 with one `use_dpop_nonce` retry, so no previous-key list is needed. On a missing or stale nonce the
 service responds:
 
-- token-style endpoints (`/v1/token`, `/v1/*/verify`): `400`
+- token-style endpoints (`/v1/token`, `/v1/*/options`, `/v1/*/verify`): `400`
   `{"error":"use_dpop_nonce"}` with a fresh `DPoP-Nonce` header;
 - resource-style endpoints (`/v1/account*`): `401` with
   `WWW-Authenticate: DPoP error="use_dpop_nonce"` and a fresh `DPoP-Nonce`.
@@ -243,6 +248,30 @@ the `Date` response header and use corrected time for `iat`.
 - A credential ID can be registered to at most one account.
 - Challenges are 32 random bytes, single-use (consumed with a conditional
   delete before verification), and expire after `CEREMONY_TTL`.
+- **Ceremonies are bound to the device key.** Every options request carries a
+  DPoP proof (§7); the service stores the proof key's thumbprint with the
+  challenge, and the matching verify request MUST carry a proof by the same
+  key. A WebAuthn response captured in transit therefore cannot be redeemed by
+  anyone else, and the session it starts is bound to the key that asked for it.
+  For the account API, the binding is to the caller's DPoP key.
+- **Registration IDs.** Every successful registration (sign-up, adding a
+  passkey, recovery) is assigned a fresh 16-byte registration ID, stored with
+  the credential and carried in every token of sessions it starts (`rid`).
+
+### RP ID scope (deployment requirement)
+
+A registration with attestation `"none"` is not signed, so its
+`clientDataJSON` (and therefore its origin) is not authenticated. Browsers let
+any page whose host is the RP ID or a subdomain of it create passkeys for that
+RP ID. A hostile page under the RP ID could therefore have the user create a
+passkey and register it to an account of the attacker's choosing; if the user
+later signs in with it, they are signed in to the attacker's account. Sign-in
+itself is not affected (assertions sign the origin, which is checked exactly).
+
+Therefore **`AUTH_RP_ID` MUST be the narrowest domain that covers the allowed
+web origins, and every host under it MUST be under the operator's control**
+(never user-generated content, never a third party). Using the app's exact host
+(for example `app.example.com`) is recommended.
 
 ### 8.1 Creation options returned by the service
 
@@ -345,8 +374,9 @@ Returned by every endpoint that starts or renews a session (RFC 6749 §5.1):
 
 ### 10.3 Sign-up
 
-**`POST /v1/register/options`** — body `{}`. Creates a challenge bound to a new
-random account ID. Response `200 {"publicKey": <creation options>}`.
+**`POST /v1/register/options`** — header `DPoP`; body `{}`. Creates a challenge
+bound to a new random account ID and to the proof key. Response
+`200 {"publicKey": <creation options>}`.
 
 **`POST /v1/register/verify`** — header `DPoP: <proof>`; body
 `{"client_id":"web","resource":"<optional aud>","credential":<RegistrationResponseJSON>}`.
@@ -355,7 +385,8 @@ Creates the account, the passkey and a recovery code atomically. Response
 
 ### 10.4 Sign-in
 
-**`POST /v1/login/options`** — body `{}`. Response `200 {"publicKey": <request options>}`.
+**`POST /v1/login/options`** — header `DPoP`; body `{}`. Creates a challenge bound
+to the proof key. Response `200 {"publicKey": <request options>}`.
 
 **`POST /v1/login/verify`** — header `DPoP`; body
 `{"client_id":"web","resource":"<optional>","credential":<AuthenticationResponseJSON>}`.
@@ -373,7 +404,7 @@ Response `200` token response. Failures: `400 {"error":"invalid_grant"}`,
 
 ### 10.6 Recovery
 
-**`POST /v1/recover/options`** — body `{"recovery_code":"XXXX-…"}`. Response
+**`POST /v1/recover/options`** — header `DPoP`; body `{"recovery_code":"XXXX-…"}`. Response
 `200 {"publicKey": <creation options for the recovered account>}`. An unknown
 code returns `400 {"error":"invalid_grant"}`.
 
@@ -401,7 +432,7 @@ Otherwise they return `401` with
 | Method and path | Step-up | Behavior |
 |---|---|---|
 | `GET /v1/account` | no | `200 {"account_id","created_at","passkeys":[{"credential_id","created_at","last_used_at","aaguid","backup_eligible","backup_state"}]}`. `aaguid` is the canonical UUID string (all zeros for most passkey providers). |
-| `POST /v1/account/passkeys/options` | yes | `200 {"publicKey": <creation options with excludeCredentials>}` |
+| `POST /v1/account/passkeys/options` | yes | `200 {"publicKey": <creation options with excludeCredentials>}`; the challenge is bound to the caller's DPoP key |
 | `POST /v1/account/passkeys/verify` | yes | body `{"credential":<RegistrationResponseJSON>}` → `201` passkey object. `409 {"error":"too_many_passkeys"}` at the limit. |
 | `DELETE /v1/account/passkeys/{credential_id}` | yes | `204`. `409 {"error":"last_passkey"}` if it is the only one. |
 | `POST /v1/account/logout-all` | no | `204`; increments the epoch. |
@@ -446,10 +477,10 @@ Long identifiers are hashed in keys because a sort key is limited to 1024 bytes.
 | `pk` | `sk` | Attributes |
 |---|---|---|
 | `ACCT#<account id>` | `META` | `created_at`, `epoch`, `passkey_count`, `recovery_key` |
-| `ACCT#<account id>` | `CRED#<H(credential id)>` | `credential_id` (B), `public_key` (B, COSE), `alg`, `sign_count`, `backup_eligible`, `backup_state`, `aaguid` (B), `transports` (L), `created_at`, `last_used_at` |
+| `ACCT#<account id>` | `CRED#<H(credential id)>` | `credential_id` (B), `registration_id` (S), `public_key` (B, COSE), `alg`, `sign_count`, `backup_eligible`, `backup_state`, `aaguid` (B), `transports` (L), `created_at`, `last_used_at` |
 | `CREDID#<H(credential id)>` | `CREDID` | `account_id` — enforces global uniqueness of credential IDs |
 | `RECOVERY#<recovery hash>` | `RECOVERY` | `account_id` |
-| `CHAL#<b64url challenge>` | `CHAL` | `kind` (`register`, `login`, `recover`, `add_passkey`), `account_id`?, `recovery_key`?, `expires_at`, `ttl` |
+| `CHAL#<b64url challenge>` | `CHAL` | `kind` (`register`, `login`, `recover`, `add_passkey`), `jkt` (bound device key), `account_id`?, `recovery_key`?, `expires_at`, `ttl` |
 | `JTI#<H(jkt ‖ 0x00 ‖ jti)>` | `JTI` | `expires_at`, `ttl` |
 
 Reads that decide revocation (`META`, `CRED#…`) are strongly consistent. Because

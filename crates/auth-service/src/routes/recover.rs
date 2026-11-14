@@ -1,12 +1,13 @@
 //! Account recovery (protocol §9, §10.6).
 
 use super::{
-    VerifyBody, client_and_audience, new_recovery_code, new_sid, recovery_key, webauthn_error,
+    VerifyBody, client_and_audience, new_recovery_code, new_registration_id, new_sid, recovery_key,
+    webauthn_error,
 };
 use crate::error::ApiError;
 use crate::http;
 use crate::state::AppState;
-use crate::store::{Ceremony, CeremonyKind, StoreError};
+use crate::store::{Ceremony, CeremonyKind, NewPasskey, StoreError};
 use crate::tokens::{self, Session};
 use crate::{dpop, options};
 use auth_core::decide::{self, CEREMONY_TTL};
@@ -32,6 +33,9 @@ pub async fn options(
     body: Result<Bytes, BytesRejection>,
 ) -> Result<Json<Value>, ApiError> {
     let req: OptionsBody = http::json(&headers, body)?;
+    let now = state.clock.now();
+    // Bind the ceremony to the device key that asks for it (protocol §8).
+    let proof = dpop::require_proof(&state, &headers, "POST", "/v1/recover/options", now).await?;
     let invalid = || ApiError::InvalidGrant("unknown recovery code".into());
     let code = crockford::decode_recovery_code(&req.recovery_code).ok_or_else(invalid)?;
     let key = recovery_key(&code);
@@ -39,7 +43,6 @@ pub async fn options(
     let account_bytes: [u8; 16] = b64::decode_str(&account_id)
         .and_then(|v| v.try_into().ok())
         .ok_or_else(|| ApiError::Internal("stored account id is malformed".into()))?;
-    let now = state.clock.now();
     let challenge = crate::random::bytes::<32>()?;
     state
         .store
@@ -49,6 +52,7 @@ pub async fn options(
                 kind: CeremonyKind::Recover,
                 account_id: Some(account_id),
                 recovery_key: Some(key),
+                jkt: proof.jkt,
                 expires_at: now + CEREMONY_TTL,
             },
         )
@@ -79,6 +83,8 @@ pub async fn verify(
         .ok_or_else(|| ApiError::InvalidGrant("unknown or used challenge".into()))?;
     if !decide::check_ceremony(
         ceremony.kind == CeremonyKind::Recover,
+        &ceremony.jkt,
+        &proof.jkt,
         ceremony.expires_at,
         now,
     ) {
@@ -103,9 +109,20 @@ pub async fn verify(
         return Err(ApiError::InvalidGrant("recovery code was replaced".into()));
     }
     let (recovery_code, new_key) = new_recovery_code()?;
+    let registration_id = new_registration_id()?;
     let epoch = match state
         .store
-        .recover_account(&account_id, &meta, &creds, &cred, &new_key, now)
+        .recover_account(
+            &account_id,
+            &meta,
+            &creds,
+            NewPasskey {
+                credential: &cred,
+                registration_id: &registration_id,
+            },
+            &new_key,
+            now,
+        )
         .await
     {
         Ok(e) => e,
@@ -126,6 +143,7 @@ pub async fn verify(
         sid: new_sid()?,
         auth_time: now,
         cid: b64::encode(&cred.credential_id),
+        rid: b64::encode(&registration_id),
         epoch,
         jkt: b64::encode(&proof.jkt),
     };

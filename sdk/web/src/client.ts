@@ -796,11 +796,13 @@ class AuthClientImpl implements AuthClient {
 
   async signUp(): Promise<SignUpResult> {
     credentialsContainer();
+    // The ceremony is bound to this device key from the options request on
+    // (protocol §8), so the passkey response cannot be redeemed with any other key.
+    const key = await generateDeviceKey();
     const publicKey = parseCreationOptionsJSON(
-      publicKeyMember(AuthClientImpl.#ok(await this.#call('/v1/register/options', {}))),
+      publicKeyMember(AuthClientImpl.#ok(await this.#call('/v1/register/options', {}, key))),
     );
     const credential = await AuthClientImpl.#create(publicKey);
-    const key = await generateDeviceKey();
     const result = await this.#call(
       '/v1/register/verify',
       { client_id: this.#clientId, resource: this.#sessionResource, credential },
@@ -841,8 +843,10 @@ class AuthClientImpl implements AuthClient {
       return null;
     }
     credentialsContainer();
+    // Bound to this device key from the options request on (protocol §8).
+    const key = await generateDeviceKey();
     const publicKey = parseRequestOptionsJSON(
-      publicKeyMember(AuthClientImpl.#ok(await this.#call('/v1/login/options', {}))),
+      publicKeyMember(AuthClientImpl.#ok(await this.#call('/v1/login/options', {}, key))),
     );
     const assertion = await AuthClientImpl.#get(publicKey, immediate);
     if (assertion === null) {
@@ -857,7 +861,6 @@ class AuthClientImpl implements AuthClient {
       // would then act on the other account).
       throw new AuthError('account_mismatch', 'the passkey belongs to a different account');
     }
-    const key = await generateDeviceKey();
     const result = await this.#call(
       '/v1/login/verify',
       { client_id: this.#clientId, resource: this.#sessionResource, credential: assertion },
@@ -972,13 +975,16 @@ class AuthClientImpl implements AuthClient {
       throw invalidRecoveryCode();
     }
     credentialsContainer();
+    // Bound to this device key from the options request on (protocol §8).
+    const key = await generateDeviceKey();
     const publicKey = parseCreationOptionsJSON(
       publicKeyMember(
-        AuthClientImpl.#ok(await this.#call('/v1/recover/options', { recovery_code: normalized })),
+        AuthClientImpl.#ok(
+          await this.#call('/v1/recover/options', { recovery_code: normalized }, key),
+        ),
       ),
     );
     const credential = await AuthClientImpl.#create(publicKey);
-    const key = await generateDeviceKey();
     const result = await this.#call(
       '/v1/recover/verify',
       { client_id: this.#clientId, resource: this.#sessionResource, credential },

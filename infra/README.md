@@ -209,7 +209,7 @@ list of every problem. Unknown properties are rejected, so typos fail too.
 | `domainName` | yes | Public host name, e.g. `auth.example.com`. The issuer is `https://<domainName>`. |
 | `certificateArn` | yes | ACM certificate for `domainName` in the **same account and region** (regional endpoint). |
 | `hostedZone` | no | `{ "id": "Z…", "name": "example.com" }`. Creates A and AAAA alias records. The domain must be inside the zone. |
-| `rpId`, `rpName` | yes | WebAuthn RP ID (a DNS name) and display name (≤ 64 bytes, no control characters). |
+| `rpId`, `rpName` | yes | WebAuthn RP ID (a DNS name) and display name (≤ 64 bytes, no control characters). **Use the narrowest domain that covers the app (ideally the app's exact host), and never one with hosts you don't control**: any page under the RP ID can create passkeys for it (protocol §8, "RP ID scope"). |
 | `allowedOrigins` | yes | WebAuthn origins: canonical `https://host[:port]` origins whose host is `rpId` or a subdomain, or `android:apk-key-hash:<43-char base64url SHA-256>`. |
 | `corsOrigins` | yes | Canonical `https://` browser origins allowed by CORS (§11). `http:`, paths, trailing slashes, default ports and uppercase hosts are rejected. |
 | `audiences` | yes | RFC 8707 resource indicators: canonical absolute `https` URIs, no query or fragment. The first is the default `aud`. The issuer is implicit and must not be listed. |

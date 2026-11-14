@@ -22,6 +22,8 @@ pub struct Session {
     pub auth_time: u64,
     /// base64url credential ID of that passkey.
     pub cid: String,
+    /// base64url registration ID of that passkey.
+    pub rid: String,
     /// Account epoch when the session started.
     pub epoch: u64,
     /// base64url thumbprint of the client's DPoP key.
@@ -68,6 +70,7 @@ pub async fn issue(
         cnf: cnf.clone(),
         sid: s.sid.clone(),
         cid: s.cid.clone(),
+        rid: s.rid.clone(),
         epoch: s.epoch,
     };
     let refresh = RefreshTokenClaims {
@@ -81,6 +84,7 @@ pub async fn issue(
         sid: s.sid.clone(),
         auth_time: s.auth_time,
         cid: s.cid.clone(),
+        rid: s.rid.clone(),
         epoch: s.epoch,
         cnf,
     };

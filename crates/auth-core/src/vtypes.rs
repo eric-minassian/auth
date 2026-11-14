@@ -268,6 +268,8 @@ pub struct AccessClaims {
     pub jkt: Vec<u8>,
     /// `cid`, base64url-decoded: the passkey that started the session.
     pub cid: Option<Vec<u8>>,
+    /// `rid`, base64url-decoded: that passkey's registration ID.
+    pub rid: Option<Vec<u8>>,
     /// `epoch`: the account's session epoch when the session started.
     pub epoch: Option<u64>,
 }
@@ -284,6 +286,7 @@ pub ghost struct AccessClaimsV {
     pub auth_time: u64,
     pub jkt: Seq<u8>,
     pub cid: Option<Seq<u8>>,
+    pub rid: Option<Seq<u8>>,
     pub epoch: Option<u64>,
 }
 
@@ -302,6 +305,7 @@ impl View for AccessClaims {
             auth_time: self.auth_time,
             jkt: self.jkt@,
             cid: opt_view(self.cid),
+            rid: opt_view(self.rid),
             epoch: self.epoch,
         }
     }
@@ -321,6 +325,8 @@ pub struct RefreshClaims {
     pub auth_time: u64,
     /// `cid`, base64url-decoded credential ID.
     pub cid: Vec<u8>,
+    /// `rid`, base64url-decoded registration ID of that credential.
+    pub rid: Vec<u8>,
     pub epoch: u64,
     /// `cnf.jkt`, base64url-decoded.
     pub jkt: Vec<u8>,
@@ -338,6 +344,7 @@ pub ghost struct RefreshClaimsV {
     pub sid: Seq<u8>,
     pub auth_time: u64,
     pub cid: Seq<u8>,
+    pub rid: Seq<u8>,
     pub epoch: u64,
     pub jkt: Seq<u8>,
 }
@@ -357,6 +364,7 @@ impl View for RefreshClaims {
             sid: self.sid@,
             auth_time: self.auth_time,
             cid: self.cid@,
+            rid: self.rid@,
             epoch: self.epoch,
             jkt: self.jkt@,
         }
@@ -397,7 +405,9 @@ impl View for JwsParts {
     }
 }
 
-/// A P-256 verification key with its `kid`.
+/// A P-256 verification key with its `kid`. `Clone` is only used by unverified
+/// callers (key caches), so its derived impl needs no specification.
+#[verifier::allow(autoderive_clone_without_spec)]
 #[derive(Debug, Clone)]
 pub struct VerifyKey {
     pub kid: Vec<u8>,

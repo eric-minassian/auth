@@ -97,9 +97,15 @@ describe('signUp', () => {
   test('sends well-formed, privacy-preserving requests', async () => {
     const { client, server } = await setup();
     await client.signUp();
-    const [options] = server.requestsTo('/v1/register/options');
+    // The options request is DPoP-signed (it binds the ceremony to the device
+    // key); the last one is the accepted attempt after any nonce retry.
+    const options = server.requestsTo('/v1/register/options').at(-1);
     const verifies = server.requestsTo('/v1/register/verify');
-    expect(options?.requestHeaders.get('dpop')).toBeNull();
+    const optionsProof = peekJwt(options?.requestHeaders.get('dpop') ?? '');
+    expect(optionsProof.payload).toMatchObject({
+      htm: 'POST',
+      htu: 'https://auth.example.com/v1/register/options',
+    });
     expect(options?.requestHeaders.get('authorization')).toBeNull();
     expect(JSON.parse(options?.requestBody ?? '')).toEqual({});
     expect(verifies).toHaveLength(1); // nonce from the options response, no retry needed
@@ -115,6 +121,8 @@ describe('signUp', () => {
     });
     expect(proof.payload['nonce']).toBe(options?.responseHeaders?.get('dpop-nonce'));
     expect(proof.payload['ath']).toBeUndefined();
+    // Options and verify are signed by the same device key.
+    expect(proof.header['jwk']).toEqual(optionsProof.header['jwk']);
     for (const exchange of server.exchanges) {
       expect(exchange.request.credentials).toBe('omit');
       expect(exchange.request.cache).toBe('no-store');

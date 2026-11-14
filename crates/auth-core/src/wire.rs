@@ -275,6 +275,8 @@ struct RawAccessClaims {
     #[serde(default)]
     cid: Option<String>,
     #[serde(default)]
+    rid: Option<String>,
+    #[serde(default)]
     epoch: Option<u64>,
 }
 
@@ -295,6 +297,10 @@ pub fn parse_access_claims(json: &[u8]) -> Option<AccessClaims> {
             Some(cid) => Some(decode_b64(cid)?),
             None => None,
         },
+        rid: match &c.rid {
+            Some(rid) => Some(decode_b64(rid)?),
+            None => None,
+        },
         epoch: c.epoch,
     })
 }
@@ -311,6 +317,7 @@ struct RawRefreshClaims {
     sid: String,
     auth_time: u64,
     cid: String,
+    rid: String,
     epoch: u64,
     cnf: RawCnf,
 }
@@ -329,6 +336,7 @@ pub fn parse_refresh_claims(json: &[u8]) -> Option<RefreshClaims> {
         sid: c.sid.into_bytes(),
         auth_time: c.auth_time,
         cid: decode_b64(&c.cid)?,
+        rid: decode_b64(&c.rid)?,
         epoch: c.epoch,
         jkt: decode_b64(&c.cnf.jkt)?,
     })

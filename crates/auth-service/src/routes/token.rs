@@ -56,7 +56,7 @@ pub async fn token(
     let meta = meta.ok_or_else(|| ApiError::InvalidGrant("account no longer exists".into()))?;
     let account = AccountState {
         epoch: meta.epoch,
-        credential_present: credential.is_some(),
+        registration: credential.map(|c| c.registration_id),
     };
     let lifetimes = decide::authorize_refresh(&verified, &account)
         .map_err(|r| ApiError::InvalidGrant(format!("{r:?}")))?;
@@ -69,6 +69,7 @@ pub async fn token(
             .map_err(|_| ApiError::InvalidGrant("sid".into()))?,
         auth_time: claims.auth_time,
         cid: b64::encode(&claims.cid),
+        rid: b64::encode(&claims.rid),
         epoch: claims.epoch,
         jkt: b64::encode(&claims.jkt),
     };

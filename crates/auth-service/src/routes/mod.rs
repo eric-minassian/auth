@@ -65,6 +65,11 @@ pub fn recovery_key(code: &[u8; crockford::RECOVERY_CODE_LEN]) -> String {
     b64::encode(&crypto::sha256(&m))
 }
 
+/// A new random registration ID (protocol §8).
+pub fn new_registration_id() -> Result<[u8; 16], ApiError> {
+    crate::random::bytes::<16>()
+}
+
 /// A new random session ID.
 pub fn new_sid() -> Result<String, ApiError> {
     Ok(b64::encode(&crate::random::bytes::<16>()?))

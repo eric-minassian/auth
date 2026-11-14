@@ -176,6 +176,8 @@ pub struct Ceremony {
     pub account_id: Option<String>,
     /// Recovery key the ceremony was started with (recovery only).
     pub recovery_key: Option<String>,
+    /// Thumbprint of the device key the ceremony is bound to (protocol §8).
+    pub jkt: Vec<u8>,
     /// Expiry (Unix seconds).
     pub expires_at: u64,
 }
@@ -198,6 +200,8 @@ pub struct AccountMeta {
 pub struct CredentialRecord {
     /// Credential ID.
     pub credential_id: Vec<u8>,
+    /// Registration ID: fresh for every registration of this credential.
+    pub registration_id: Vec<u8>,
     /// COSE_Key.
     pub public_key: Vec<u8>,
     /// COSE algorithm.
@@ -237,6 +241,7 @@ fn credential_from(item: &Item) -> Result<CredentialRecord, StoreError> {
     };
     Ok(CredentialRecord {
         credential_id: get_b(item, "credential_id")?,
+        registration_id: get_b(item, "registration_id")?,
         public_key: get_b(item, "public_key")?,
         alg,
         sign_count: u32::try_from(get_n(item, "sign_count")?)
@@ -253,9 +258,11 @@ fn credential_from(item: &Item) -> Result<CredentialRecord, StoreError> {
     })
 }
 
-fn credential_item(account_id: &str, c: &RegisteredCredential, now: u64) -> Item {
+fn credential_item(account_id: &str, p: NewPasskey<'_>, now: u64) -> Item {
+    let c = p.credential;
     let mut item = key(acct_pk(account_id), &cred_sk(&c.credential_id));
     item.insert("credential_id".into(), bin(&c.credential_id));
+    item.insert("registration_id".into(), bin(p.registration_id));
     item.insert("public_key".into(), bin(&c.cose_key));
     // Stored as a string so negative COSE identifiers round-trip unambiguously.
     item.insert("alg".into(), s(c.alg.to_string()));
@@ -284,6 +291,15 @@ fn recovery_item(account_id: &str, recovery_key: &str) -> Item {
     let mut item = key(recovery_pk(recovery_key), "RECOVERY");
     item.insert("account_id".into(), s(account_id));
     item
+}
+
+/// A verified credential about to be stored, with its fresh registration ID.
+#[derive(Debug, Clone, Copy)]
+pub struct NewPasskey<'a> {
+    /// The verified credential.
+    pub credential: &'a RegisteredCredential,
+    /// Its registration ID (protocol §8).
+    pub registration_id: &'a [u8],
 }
 
 /// Errors when adding a passkey.
@@ -417,6 +433,7 @@ impl Store {
         if let Some(r) = &c.recovery_key {
             item.insert("recovery_key".into(), s(r.clone()));
         }
+        item.insert("jkt".into(), bin(&c.jkt));
         item.insert("expires_at".into(), n(c.expires_at));
         item.insert("ttl".into(), n(c.expires_at.saturating_add(3600)));
         self.client
@@ -452,6 +469,7 @@ impl Store {
                 .get("recovery_key")
                 .and_then(|v| v.as_s().ok())
                 .cloned(),
+            jkt: get_b(&item, "jkt")?,
             expires_at: get_n(&item, "expires_at")?,
         }))
     }
@@ -494,7 +512,7 @@ impl Store {
     pub async fn create_account(
         &self,
         account_id: &str,
-        cred: &RegisteredCredential,
+        passkey: NewPasskey<'_>,
         recovery_key: &str,
         now: u64,
     ) -> Result<(), StoreError> {
@@ -506,8 +524,11 @@ impl Store {
         let not_exists = Some("attribute_not_exists(pk)");
         self.transact(vec![
             self.put(meta, not_exists)?,
-            self.put(credential_item(account_id, cred, now), not_exists)?,
-            self.put(credid_item(account_id, &cred.credential_id), not_exists)?,
+            self.put(credential_item(account_id, passkey, now), not_exists)?,
+            self.put(
+                credid_item(account_id, &passkey.credential.credential_id),
+                not_exists,
+            )?,
             self.put(recovery_item(account_id, recovery_key), not_exists)?,
         ])
         .await
@@ -616,7 +637,7 @@ impl Store {
     pub async fn add_credential(
         &self,
         account_id: &str,
-        cred: &RegisteredCredential,
+        passkey: NewPasskey<'_>,
         max: u64,
         now: u64,
     ) -> Result<Result<(), AddError>, StoreError> {
@@ -629,8 +650,11 @@ impl Store {
                     "attribute_exists(pk) AND passkey_count < :max",
                     HashMap::from([(":one".into(), n(1)), (":max".into(), n(max))]),
                 )?,
-                self.put(credential_item(account_id, cred, now), not_exists)?,
-                self.put(credid_item(account_id, &cred.credential_id), not_exists)?,
+                self.put(credential_item(account_id, passkey, now), not_exists)?,
+                self.put(
+                    credid_item(account_id, &passkey.credential.credential_id),
+                    not_exists,
+                )?,
             ])
             .await;
         match r {
@@ -761,10 +785,11 @@ impl Store {
         account_id: &str,
         meta: &AccountMeta,
         creds: &[CredentialRecord],
-        new_cred: &RegisteredCredential,
+        passkey: NewPasskey<'_>,
         new_recovery_key: &str,
         now: u64,
     ) -> Result<u64, StoreError> {
+        let new_cred = passkey.credential;
         let new_epoch = meta
             .epoch
             .checked_add(1)
@@ -804,7 +829,7 @@ impl Store {
         } else {
             Some("attribute_not_exists(pk)")
         };
-        items.push(self.put(credential_item(account_id, new_cred, now), cond)?);
+        items.push(self.put(credential_item(account_id, passkey, now), cond)?);
         items.push(self.put(credid_item(account_id, &new_cred.credential_id), cond)?);
         self.transact(items).await?;
         Ok(new_epoch)

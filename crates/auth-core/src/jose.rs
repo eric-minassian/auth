@@ -53,6 +53,8 @@ pub struct AccessTokenClaims {
     pub sid: String,
     /// base64url credential ID of the passkey that started the session.
     pub cid: String,
+    /// base64url registration ID of that passkey.
+    pub rid: String,
     /// Account session epoch when the session started.
     pub epoch: u64,
 }
@@ -70,6 +72,7 @@ pub struct RefreshTokenClaims {
     pub sid: String,
     pub auth_time: u64,
     pub cid: String,
+    pub rid: String,
     pub epoch: u64,
     pub cnf: Cnf,
 }

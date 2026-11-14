@@ -63,6 +63,7 @@ impl Fixture {
                 },
                 sid: b64::encode(&[1; 16]),
                 cid: b64::encode(b"passkey"),
+                rid: b64::encode(b"registration"),
                 epoch: 7,
             },
         )
@@ -115,6 +116,7 @@ async fn accepts_a_valid_request() {
         id.session,
         Some(auth_verifier::SessionRef {
             credential_id: b64::encode(b"passkey"),
+            registration_id: b64::encode(b"registration"),
             epoch: 7
         })
     );

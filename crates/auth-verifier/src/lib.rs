@@ -197,6 +197,9 @@ pub struct Identity {
 pub struct SessionRef {
     /// base64url credential ID of the passkey that started the session.
     pub credential_id: String,
+    /// base64url registration ID of that passkey. A session is only active
+    /// while the credential is registered with this registration ID.
+    pub registration_id: String,
     /// The account's session epoch when the session started.
     pub epoch: u64,
 }
@@ -411,9 +414,10 @@ impl Verifier {
             auth_time: id.auth_time,
             expires_at: id.exp,
             key_thumbprint: b64::encode(&id.jkt),
-            session: match (id.cid, id.epoch) {
-                (Some(cid), Some(epoch)) => Some(SessionRef {
+            session: match (id.cid, id.rid, id.epoch) {
+                (Some(cid), Some(rid), Some(epoch)) => Some(SessionRef {
                     credential_id: b64::encode(&cid),
+                    registration_id: b64::encode(&rid),
                     epoch,
                 }),
                 _ => None,
