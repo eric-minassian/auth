@@ -1,0 +1,30 @@
+[package]
+name = "auth-core"
+description = "Formally verified decision core of the passkey auth service: WebAuthn, DPoP and token checks."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[features]
+# Exposes a software authenticator, a CBOR encoder and token builders for tests
+# in other crates. Never enable in production builds.
+test-support = ["aws-lc-rs/ring-io"]
+
+[dependencies]
+vstd.workspace = true
+aws-lc-rs.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+auth-core = { path = ".", features = ["test-support"] }
+proptest.workspace = true
+aws-lc-rs = { workspace = true, features = ["ring-io"] }
+
+[package.metadata.verus]
+verify = true
+
+[lints]
+workspace = true
