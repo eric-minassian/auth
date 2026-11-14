@@ -1,0 +1,53 @@
+name: Formal verification
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verus:
+    name: Verus (auth-core decision layer)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install Verus
+        run: |
+          scripts/install-tools.sh verus
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Verify
+        working-directory: crates/auth-core
+        run: |
+          cargo verus verify 2>&1 | tee verus.log
+          grep -E "verification results:: [0-9]+ verified, 0 errors" verus.log
+
+  kani:
+    name: Kani (parsers and contracts)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: model-checking/kani-github-action@f838096619a707b0f6b2118cf435eaccfa33e51f # v1.1
+        with:
+          kani-version: "0.68.0"
+          working-directory: crates/auth-core
+          args: --jobs 4 --output-format terse
+
+  tamarin:
+    name: Tamarin (protocol model)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install Tamarin and Maude
+        run: |
+          scripts/install-tools.sh tamarin
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - run: scripts/prove-model.sh
