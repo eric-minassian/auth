@@ -68,7 +68,14 @@
    for a victim also requires the victim's current epoch, a credential ID and
    its secret registration ID. KMS key policies grant `Sign` to the service role
    only.
-7. **RP ID scope.** If a host under `AUTH_RP_ID` is not under the operator's
+7. **A device compromised within its step-up window can take over the
+   account.** Sensitive account operations require a passkey sign-in within
+   the last 5 minutes (RFC 9470 step-up), not a fresh assertion bound to the
+   operation. Malware controlling a device right after its user signed in can
+   therefore add its own passkey (Tamarin witness A4). Requiring a fresh,
+   operation-bound passkey assertion for adding a passkey and rotating the
+   recovery code would close this at the cost of an extra prompt.
+8. **RP ID scope.** If a host under `AUTH_RP_ID` is not under the operator's
    control, a page there can plant a passkey for an attacker's account (see
    protocol §8). The configuration cannot detect this; it is a deployment
    requirement.

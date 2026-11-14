@@ -332,6 +332,22 @@ without those headers: `403 {"error":"access_denied"}`,
 `413 {"error":"payload_too_large"}` or `429`. Errors use the OAuth error object
 `{"error":"<code>","error_description":"<human text>"}`.
 
+### 10.0 Rules for every ceremony
+
+Every `*/verify` endpoint (sign-up, sign-in, recovery, adding a passkey) MUST,
+in this order:
+
+1. check the request's DPoP proof (nonce required, `jti` single-use);
+2. consume the challenge named in `clientDataJSON` with a conditional delete
+   (an unknown or already used challenge is `invalid_grant`);
+3. check that the challenge's `kind` matches the endpoint, that it is bound to
+   the proof's key thumbprint, and that it has not expired;
+4. for adding a passkey, check that the challenge's `account_id` equals the
+   caller's `sub`; for recovery, apply the change in one transaction that is
+   conditional on the account's recovery-code hash still being the one the
+   challenge was issued for (a code replaced in between makes recovery fail);
+5. only then verify the WebAuthn response.
+
 ### 10.1 Discovery
 
 **`GET /.well-known/oauth-authorization-server`** — RFC 8414 metadata.
@@ -419,8 +435,8 @@ plus `"recovery_code"`.
 Every request carries `Authorization: DPoP <access token with aud = AUTH_ISSUER>`
 and a `DPoP` proof with `ath` and `nonce`. In addition to the token and proof
 checks, every request requires the session to be **active**: the passkey `cid`
-is still registered and the account's epoch equals the token's `epoch`
-(strongly consistent reads). Revoked sessions are therefore rejected
+is still registered **with the token's registration ID `rid`** and the
+account's epoch equals the token's `epoch` (strongly consistent reads). Revoked sessions are therefore rejected
 immediately, not when their access token expires. Failures use
 `WWW-Authenticate: DPoP error="invalid_token", algs="ES256"` (RFC 9449 §7.1).
 

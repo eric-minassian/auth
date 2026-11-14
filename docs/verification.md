@@ -123,6 +123,20 @@ Run: `cd crates/auth-core && cargo kani --jobs 8 --output-format terse`.
 See [`model/README.md`](../model/README.md) for the model, its abstractions,
 the threat model and each lemma. Run: `scripts/prove-model.sh`.
 
+In the default (honest-deployment) configuration, 44 lemmas are proven:
+authentication of resource access bound to the device key, token theft
+without the device key being useless, sign-out everywhere, passkey removal
+(including re-registration of the same credential ID) and recovery revoking
+refresh **and** account-API access, injective agreement of sign-in including
+the device key, and phishing resistance. Under `-D=ATTACKS`, six witnesses show
+what happens when the deployment assumptions do not hold (leaked signing keys,
+a hostile page under the RP ID, a compromised device within its step-up
+window).
+
+Two protocol weaknesses were found by the model and fixed before this
+release: WebAuthn responses were not bound to the device key that requested
+the ceremony, and re-registering a removed credential ID revived its sessions.
+
 ## Trusted computing base
 
 Not proven, and trusted:

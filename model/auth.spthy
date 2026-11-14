@@ -1,0 +1,2231 @@
+theory PasskeyAuth
+begin
+
+/*
+ * Formal model of the passkey-only, PII-free authentication protocol
+ * described in docs/protocol.md.  See model/README.md for the abstractions,
+ * the threat model and a plain-English reading of every lemma.
+ *
+ *   tamarin-prover --prove model/auth.spthy                 security + executability
+ *   tamarin-prover --prove -D=ATTACKS model/auth.spthy      attack / limit witnesses
+ *
+ * Conventions
+ *   ~x   fresh value (account IDs, challenges, session IDs, keys, jti, ...)
+ *   $x   public name (audiences come from a configured allowlist)
+ *   Epochs and credential generations are fresh values (see the helper
+ *   lemmas): "increment" = replace by a never-seen value.  The registration
+ *   ID (`rid`, §8) of a passkey is the fresh handle ~rec of its CRED record.
+ *   Rules named *_H run on an honest client's TLS connection (request and
+ *   response are private linear facts); rules named *_A run on a connection
+ *   opened by the adversary (Dolev-Yao In/Out).  The server logic is the same.
+ *   [no_derivcheck] marks rules that verify a signature by pattern matching
+ *   (sign(m, k) / revealSign(m, k) against pk(k)), the standard encoding of
+ *   verify(...) = true, or that match typed fresh values on purpose.
+ *   [no_precomp] keeps server state and persistent facts out of Tamarin's
+ *   source precomputation (purely a performance annotation).
+ */
+
+builtins: signing, revealing-signing, hashing
+
+/* Typed values: account IDs, session IDs, token IDs (jti), WebAuthn
+   challenges, recovery codes, credential IDs chosen by platform
+   authenticators, and the credential-ID, registration-ID and epoch claims of
+   tokens.  The constructors only make the type of a value explicit (they
+   are public: the adversary can apply them too).  See model/README.md. */
+functions: uid/1, sid/1, cred/1, regid/1, epoch/1, tid/1, credid/1, chal/1, rcode/1
+
+/* ------------------------------------------------------------------------
+ * Message formats
+ * ---------------------------------------------------------------------- */
+
+macros:
+  /* JWTs are JWS compact serialisations: the header and claims are
+     readable by anyone (revealing signatures, getMessage), the signature
+     can only be produced with the signing key. */
+
+  /* RFC 9449 DPoP proof: typ, jwk, htu (method + URI), ath, jti.  The
+     nonce and iat claims are timing mechanisms and are abstracted away. */
+  DPB(dpk, htu, ath, jti) = <'dpop+jwt', dpk, htu, ath, tid(jti)>,
+  DPOP(k, htu, ath, jti)  = revealSign(DPB(pk(k), htu, ath, jti), k),
+
+  /* RFC 9068 access token (§6.1): typ at+jwt, sub, aud, cnf.jkt, sid, cid,
+     rid, epoch, jti */
+  ATB(a, aud, jkt, s, cid, rid, ep, j) =
+      <'at+jwt', a, aud, jkt, s, cred(cid), regid(rid), epoch(ep), tid(j)>,
+  AT(sk, a, aud, jkt, s, cid, rid, ep, j) =
+      revealSign(ATB(a, aud, jkt, s, cid, rid, ep, j), sk),
+
+  /* Stateless DPoP-bound refresh token (§6.2): typ rt+jwt, sub, sid, cid,
+     rid, epoch, cnf.jkt, jti; signed with a separate key */
+  RTB(a, s, cid, rid, ep, jkt, j) =
+      <'rt+jwt', a, s, cred(cid), regid(rid), epoch(ep), jkt, tid(j)>,
+  RT(sk, a, s, cid, rid, ep, jkt, j) =
+      revealSign(RTB(a, s, cid, rid, ep, jkt, j), sk),
+
+  /* WebAuthn registration response with attestation "none": clientData
+     (type, challenge, origin) and authenticatorData (rpIdHash, credential ID,
+     credential public key).  Nothing in it is signed. */
+  REG(c, origin, rpid, cid, pkc) = <'reg', <'webauthn.create', c, origin>, <h(rpid), cid, pkc>>,
+
+  /* WebAuthn assertion: the authenticator signs authenticatorData (rpIdHash)
+     together with SHA-256(clientDataJSON) (type, challenge, origin); the
+     userHandle is returned alongside (unsigned). */
+  CDG(c, origin) = <'webauthn.get', c, origin>,
+  ASM(rpid, c, origin) = <h(rpid), h(CDG(c, origin))>,
+  ASSERTION(cid, rpid, c, origin, sk, uh) =
+      <'assert', cid, h(rpid), CDG(c, origin), sign(ASM(rpid, c, origin), sk), uh>
+
+/* ------------------------------------------------------------------------
+ * Restrictions
+ * ---------------------------------------------------------------------- */
+
+restriction OnlyOnce:
+  "All x #i #j. OnlyOnce(x)@i & OnlyOnce(x)@j ==> #i = #j"
+
+/* §7.3: every DPoP proof jti is single-use at the auth service (per key). */
+restriction DpopJtiSingleUse:
+  "All jkt j #a #b. DpopJti(jkt, j)@a & DpopJti(jkt, j)@b ==> #a = #b"
+
+/* A deleted CRED#... item can never be read again (strongly consistent
+   reads); deleting it a second time fails. */
+restriction CredDeleted:
+  "All rec #i #j. CredRemoved(rec)@i & CredUse(rec)@j ==> #j < #i | #i = #j"
+
+/* ------------------------------------------------------------------------
+ * Setup.  One auth service with separate, honest (KMS) signing keys for
+ * access and refresh tokens.  The access-token public key is published.
+ * ---------------------------------------------------------------------- */
+
+rule AS_Setup:
+    [ Fr(~skAT), Fr(~skRT) ]
+  --[ OnlyOnce('AS_Setup'), ASKeysGen(~skAT, ~skRT) ]->
+    [ !ASKeys(~skAT, ~skRT), !PkAT(pk(~skAT)), Out(pk(~skAT)) ]
+
+/* The user's platform authenticator generates a new credential (ID and
+   key pair) when a page asks for one; which page and which RP ID it is
+   scoped to is decided by the ceremony rule that consumes it.  Credential
+   IDs and public keys are not secret. */
+rule Authenticator_NewCredential:
+    [ Fr(~cid), Fr(~sk) ]
+  --[ PlatformKey(pk(~sk)) ]->
+    [ NewCred(credid(~cid), ~sk), Out(<credid(~cid), pk(~sk)>) ]
+
+/* Client devices: one non-extractable DPoP key per device. */
+rule Device_Init:
+    [ Fr(~k) ]
+  --[ NewDevice(~k) ]->
+    [ !DeviceKey(~k), Out(pk(~k)) ]
+
+/* ======================================================================
+ * Sign-up (§10.3).  Every options request carries a DPoP proof; the
+ * challenge is stored with the proof key's thumbprint (§8 "Ceremonies are
+ * bound to the device key") and the verify request must be proven by the
+ * same key.  WebAuthn responses produced by honest clients are given to the
+ * adversary (Out): the model assumes they can leak in transit.
+ * ==================================================================== */
+
+rule C_SignUp_Options:
+    [ !DeviceKey(k)[no_precomp], Fr(~ch), Fr(~jti) ]
+  -->
+    [ Req_register_options(~ch, <'register_options',
+                                 DPOP(k, 'as_register_options', 'none', ~jti)>),
+      C_SU1(~ch, k) ]
+
+/* Account IDs are pseudonymous but not secret: they are the `sub` of every
+   access token and visible to every resource server.  The model therefore
+   publishes them (an over-approximation of what the adversary learns). */
+rule AS_Register_Options_H [no_derivcheck]:
+  let aid = uid(~a)
+      jkt = h(pk(~dk))
+  in
+    [ Req_register_options(~ch, <'register_options',
+                                 DPOP(~dk, 'as_register_options', 'none', jti)>),
+      Fr(~a), Fr(~c), Fr(~g), Fr(~e) ]
+  --[ DpopJti(jkt, jti), ChalIssued(chal(~c), jkt),
+      HonestAccount(aid), EpochCreated(aid, ~e), GenCreated(aid, ~g) ]->
+    [ Out(aid),
+      Resp_register_options(~ch, <'register_options_resp', chal(~c), aid, 'rp'>),
+      Chal_register(chal(~c), 'register', ~a, jkt),
+      Acct(~a, 'pending', ~g, ~e, 'none') ]
+
+rule AS_Register_Options_A [no_derivcheck]:
+  let aid = uid(~a)
+      jkt = h(pk(dk))
+  in
+    [ In(<'register_options', DPOP(dk, 'as_register_options', 'none', jti)>),
+      Fr(~a), Fr(~c), Fr(~g), Fr(~e) ]
+  --[ DpopJti(jkt, jti), ChalIssued(chal(~c), jkt),
+      EpochCreated(aid, ~e), GenCreated(aid, ~g), AdvAct(aid), AdvNewAccount(aid) ]->
+    [ Out(<'register_options_resp', chal(~c), aid, 'rp'>),
+      Chal_register(chal(~c), 'register', ~a, jkt),
+      Acct(~a, 'pending', ~g, ~e, 'none') ]
+
+/* The browser at the honest origin asks the platform authenticator to
+   create a discoverable credential for RP ID 'rp' and user.id = a. */
+rule C_SignUp_Create [no_derivcheck]:
+  let c = chal(~c)
+      cid = credid(~cid)
+      resp = REG(c, <'rp', 'app'>, 'rp', cid, pk(~skc))
+  in
+    [ C_SU1(ch, k), Resp_register_options(ch, <'register_options_resp', c, a, 'rp'>),
+      NewCred(cid, ~skc), Fr(~jti), Fr(~ch2) ]
+  --[ ClientCeremony(a, k, c), ClientChal(k, c), ClientNewPasskey(a, cid, 'signup') ]->
+    [ !Passkey('rp', a, cid, ~skc),
+      Out(resp),
+      Req_register_verify(~ch2, <'register_verify', $aud, resp,
+                                 DPOP(k, 'as_register', 'none', ~jti)>),
+      C_SU2(~ch2, k, a, $aud) ]
+
+/* Single-use challenge of kind register, bound to the proof key; origin and
+   RP ID checked; account, passkey (with a fresh registration ID) and
+   recovery code created atomically; session started. */
+rule AS_Register_Verify_H [no_derivcheck]:
+  let aid = uid(~a)
+      sidv = sid(~sid)
+      jkt = h(pk(~dk))
+      at  = AT(skAT, aid, $aud, jkt, sidv, credid(~cid), ~rec, ~e, ~atj)
+      rt  = RT(skRT, aid, sidv, credid(~cid), ~rec, ~e, jkt, ~rtj)
+  in
+    [ Req_register_verify(~ch, <'register_verify', $aud,
+                REG(c, <'rp', 'app'>, 'rp', credid(~cid), pkc),
+                DPOP(~dk, 'as_register', 'none', jti)>),
+      Chal_register(c, 'register', ~a, jkt)[no_precomp],
+      Acct(~a, 'pending', ~g, ~e, 'none')[no_precomp],
+      !ASKeys(skAT, skRT)[no_precomp],
+      Fr(~rec), Fr(~sid), Fr(~rc), Fr(~atj), Fr(~rtj) ]
+  --[ DpopJti(jkt, jti), ChalUsed(c, jkt),
+      EpochRead(aid, ~e), GenRead(aid, ~g),
+      CredReg(aid, credid(~cid), ~rec, pkc, ~g, 'h'),
+      SessionStart(aid, sidv, credid(~cid), ~rec, ~e, jkt, 'h') ]->
+    [ Acct(~a, 'active', ~g, ~e, h(rcode(~rc))),
+      !Cred(~rec, ~a, credid(~cid), ~g, pkc),
+      !RecIdx(h(rcode(~rc)), ~a),
+      !IssuedTokens(~a, $aud, pk(~dk), ~atj, ~sid, credid(~cid), ~rec, ~e, ~rtj),
+      Resp_register_verify(~ch, <'register_verify_resp', aid, at, rt, rcode(~rc)>) ]
+
+rule AS_Register_Verify_A [no_derivcheck]:
+  let aid = uid(~a)
+      sidv = sid(~sid)
+      jkt = h(pk(dk))
+      at  = AT(skAT, aid, $aud, jkt, sidv, cid, ~rec, ~e, ~atj)
+      rt  = RT(skRT, aid, sidv, cid, ~rec, ~e, jkt, ~rtj)
+  in
+    [ In(<'register_verify', $aud,
+          REG(c, <'rp', 'app'>, 'rp', cid, pkc),
+          DPOP(dk, 'as_register', 'none', jti)>),
+      Chal_register(c, 'register', ~a, jkt)[no_precomp],
+      Acct(~a, 'pending', ~g, ~e, 'none')[no_precomp],
+      !ASKeys(skAT, skRT)[no_precomp],
+      Fr(~rec), Fr(~sid), Fr(~rc), Fr(~atj), Fr(~rtj) ]
+  --[ DpopJti(jkt, jti), ChalUsed(c, jkt),
+      EpochRead(aid, ~e), GenRead(aid, ~g), AdvAct(aid), AdvCeremony(aid, c, jkt),
+      CredReg(aid, cid, ~rec, pkc, ~g, 'adv'),
+      SessionStart(aid, sidv, cid, ~rec, ~e, jkt, 'adv') ]->
+    [ Acct(~a, 'active', ~g, ~e, h(rcode(~rc))),
+      !Cred(~rec, ~a, cid, ~g, pkc),
+      !RecIdx(h(rcode(~rc)), ~a),
+      Out(<'register_verify_resp', aid, at, rt, rcode(~rc)>) ]
+
+rule C_SignUp_Done:
+    [ C_SU2(ch, k, a, aud), Resp_register_verify(ch, <'register_verify_resp', a, at, rt, rc>) ]
+  --[ ClientSignUpDone(a, k) ]->
+    [ !ClientAT(k, a, aud, at), !ClientRT(k, a, rt), !RecCode(a, rc) ]
+
+/* ======================================================================
+ * Sign-in (§10.4)
+ * ==================================================================== */
+
+rule C_Login_Options:
+    [ !DeviceKey(k)[no_precomp], Fr(~ch), Fr(~jti) ]
+  -->
+    [ Req_login_options(~ch, <'login_options', DPOP(k, 'as_login_options', 'none', ~jti)>),
+      C_LI1(~ch, k) ]
+
+rule AS_Login_Options_H [no_derivcheck]:
+  let jkt = h(pk(~dk))
+  in
+    [ Req_login_options(~ch, <'login_options', DPOP(~dk, 'as_login_options', 'none', jti)>),
+      Fr(~c) ]
+  --[ DpopJti(jkt, jti), ChalIssued(chal(~c), jkt) ]->
+    [ Resp_login_options(~ch, <'login_options_resp', chal(~c), 'rp'>),
+      Chal_login(chal(~c), 'login', jkt) ]
+
+rule AS_Login_Options_A [no_derivcheck]:
+  let jkt = h(pk(dk))
+  in
+    [ In(<'login_options', DPOP(dk, 'as_login_options', 'none', jti)>), Fr(~c) ]
+  --[ DpopJti(jkt, jti), ChalIssued(chal(~c), jkt) ]->
+    [ Out(<'login_options_resp', chal(~c), 'rp'>),
+      Chal_login(chal(~c), 'login', jkt) ]
+
+/* The user picks any discoverable credential for RP ID 'rp'.  The
+   assertion is recorded together with the thumbprint of the device key that
+   asked for the challenge.  The client ceremony rules match the shapes the
+   honest server and authenticator always produce (chal(~c), credid(~cid),
+   and user handles uid(~a)); a credential planted with any other user
+   handle (ATTACKS only) could never be accepted by the server, which looks
+   the account up by user handle, so no relevant behaviour is lost.  Hence
+   [no_derivcheck] on these four rules. */
+rule C_Login_Assert [no_derivcheck]:
+  let c = chal(~c)
+      a = uid(~a)
+      cid = credid(~cid)
+      resp = ASSERTION(cid, 'rp', c, <'rp', 'app'>, ~skc, a)
+  in
+    [ C_LI1(ch, k), Resp_login_options(ch, <'login_options_resp', c, 'rp'>),
+      !Passkey('rp', a, cid, ~skc)[no_precomp], Fr(~jti), Fr(~ch2) ]
+  --[ Asserted(pk(~skc), c, 'rp', <'rp', 'app'>, h(pk(k))),
+      ClientCeremony(a, k, c), ClientChal(k, c) ]->
+    [ Out(resp),
+      Req_login_verify(~ch2, <'login_verify', $aud, resp,
+                              DPOP(k, 'as_login', 'none', ~jti)>),
+      C_LI2(~ch2, k, a, cid, $aud) ]
+
+/* Challenge of kind login consumed and bound to the proof key; credential
+   looked up by cid on the account named by userHandle; signature checked
+   over rpIdHash and clientData (type, challenge, exact origin); the
+   credential must belong to the current generation (i.e. survived every
+   recovery) and must not have been removed. */
+rule AS_Login_Verify_H [no_derivcheck]:
+  let aid = uid(~a)
+      sidv = sid(~sid)
+      jkt = h(pk(~dk))
+      at  = AT(skAT, aid, $aud, jkt, sidv, credid(~cid), ~rec, ~e, ~atj)
+      rt  = RT(skRT, aid, sidv, credid(~cid), ~rec, ~e, jkt, ~rtj)
+  in
+    [ Req_login_verify(~ch, <'login_verify', $aud,
+                ASSERTION(credid(~cid), 'rp', c, <'rp', 'app'>, skc, aid),
+                DPOP(~dk, 'as_login', 'none', jti)>),
+      Chal_login(c, 'login', jkt)[no_precomp],
+      !Cred(~rec, ~a, credid(~cid), ~g, pk(skc))[no_precomp],
+      Acct(~a, 'active', ~g, ~e, rch)[no_precomp],
+      !ASKeys(skAT, skRT)[no_precomp],
+      Fr(~sid), Fr(~atj), Fr(~rtj) ]
+  --[ DpopJti(jkt, jti), ChalUsed(c, jkt),
+      CredUse(~rec), EpochRead(aid, ~e), GenRead(aid, ~g),
+      AcceptAssertion(aid, credid(~cid), pk(skc), c, ~rec, jkt),
+      SessionStart(aid, sidv, credid(~cid), ~rec, ~e, jkt, 'h') ]->
+    [ Acct(~a, 'active', ~g, ~e, rch),
+      !IssuedTokens(~a, $aud, pk(~dk), ~atj, ~sid, credid(~cid), ~rec, ~e, ~rtj),
+      Resp_login_verify(~ch, <'login_verify_resp', aid, at, rt>) ]
+
+rule AS_Login_Verify_A [no_derivcheck]:
+  let aid = uid(~a)
+      sidv = sid(~sid)
+      jkt = h(pk(dk))
+      at  = AT(skAT, aid, $aud, jkt, sidv, cid, ~rec, ~e, ~atj)
+      rt  = RT(skRT, aid, sidv, cid, ~rec, ~e, jkt, ~rtj)
+  in
+    [ In(<'login_verify', $aud,
+          ASSERTION(cid, 'rp', c, <'rp', 'app'>, skc, aid),
+          DPOP(dk, 'as_login', 'none', jti)>),
+      Chal_login(c, 'login', jkt)[no_precomp],
+      !Cred(~rec, ~a, cid, ~g, pk(skc))[no_precomp],
+      Acct(~a, 'active', ~g, ~e, rch)[no_precomp],
+      !ASKeys(skAT, skRT)[no_precomp],
+      Fr(~sid), Fr(~atj), Fr(~rtj) ]
+  --[ DpopJti(jkt, jti), ChalUsed(c, jkt),
+      CredUse(~rec), EpochRead(aid, ~e), GenRead(aid, ~g),
+      AdvAct(aid), AdvSignIn(aid, pk(skc), c, jkt),
+      AcceptAssertion(aid, cid, pk(skc), c, ~rec, jkt),
+      SessionStart(aid, sidv, cid, ~rec, ~e, jkt, 'adv') ]->
+    [ Acct(~a, 'active', ~g, ~e, rch),
+      Out(<'login_verify_resp', aid, at, rt>) ]
+
+rule C_Login_Done:
+    [ C_LI2(ch, k, a, cid, aud), Resp_login_verify(ch, <'login_verify_resp', a, at, rt>) ]
+  --[ ClientLoginDone(a, k), ClientLoginWith(a, cid) ]->
+    [ !ClientAT(k, a, aud, at), !ClientRT(k, a, rt) ]
+
+/* ======================================================================
+ * Refresh (§6.2, §10.5)
+ * ==================================================================== */
+
+rule C_Refresh:
+    [ !ClientRT(k, a, rt)[no_precomp], Fr(~jti), Fr(~ch) ]
+  -->
+    [ Req_token(~ch, <'token', $aud, rt, DPOP(k, 'as_token', 'none', ~jti)>),
+      C_RF(~ch, k, a, $aud) ]
+
+/* §6.2 rules 1, 4, 5, 6: refresh-key signature and typ, DPoP proof whose
+   key thumbprint equals cnf.jkt, the passkey cid is still registered on the
+   account with registration ID rid (record not removed, current
+   generation), and epoch equals the current epoch.  Old refresh tokens are
+   not tracked; TTLs are not modelled (so they never expire). */
+rule AS_Refresh_H [no_derivcheck]:
+  let aid = uid(~a)
+      sidv = sid(~sid)
+      jkt = h(pk(~dk))
+      at  = AT(skAT, aid, $aud, jkt, sidv, credid(~cid), ~rec, ~e, ~atj)
+      rt2 = RT(skRT, aid, sidv, credid(~cid), ~rec, ~e, jkt, ~rtj2)
+  in
+    [ Req_token(~ch, <'token', $aud, RT(skRT, aid, sidv, credid(~cid), ~rec, ~e, jkt, rtj),
+                DPOP(~dk, 'as_token', 'none', jti)>),
+      !ASKeys(skAT, skRT)[no_precomp],
+      Acct(~a, 'active', ~g, ~e, rch)[no_precomp],
+      !Cred(~rec, ~a, credid(~cid), ~g, pkc)[no_precomp],
+      Fr(~atj), Fr(~rtj2) ]
+  --[ DpopJti(jkt, jti),
+      CredUse(~rec), EpochRead(aid, ~e), GenRead(aid, ~g),
+      SessionUse(aid, sidv, credid(~cid), ~rec, ~e, jkt),
+      AcceptRefresh(aid, sidv, credid(~cid), ~rec, ~e, jkt) ]->
+    [ Acct(~a, 'active', ~g, ~e, rch),
+      !IssuedTokens(~a, $aud, pk(~dk), ~atj, ~sid, credid(~cid), ~rec, ~e, ~rtj2),
+      Resp_token(~ch, <'token_resp', aid, at, rt2>) ]
+
+rule AS_Refresh_A [no_derivcheck]:
+  let aid = uid(~a)
+      jkt = h(pk(dk))
+      at  = AT(skAT, aid, $aud, jkt, sid(~sid), cid, ~rec, ~e, ~atj)
+      rt2 = RT(skRT, aid, sid(~sid), cid, ~rec, ~e, jkt, ~rtj2)
+  in
+    [ In(<'token', $aud, RT(skRT, aid, sid(~sid), cid, ~rec, ~e, jkt, rtj),
+          DPOP(dk, 'as_token', 'none', jti)>),
+      !ASKeys(skAT, skRT)[no_precomp],
+      Acct(~a, 'active', ~g, ~e, rch)[no_precomp],
+      !Cred(~rec, ~a, cid, ~g, pkc)[no_precomp],
+      Fr(~atj), Fr(~rtj2) ]
+  --[ DpopJti(jkt, jti),
+      CredUse(~rec), EpochRead(aid, ~e), GenRead(aid, ~g),
+      AdvAct(aid), AdvTokenUse(aid, sid(~sid), cid, ~rec, ~e, jkt),
+      SessionUse(aid, sid(~sid), cid, ~rec, ~e, jkt),
+      AcceptRefresh(aid, sid(~sid), cid, ~rec, ~e, jkt) ]->
+    [ Acct(~a, 'active', ~g, ~e, rch),
+      Out(<'token_resp', aid, at, rt2>) ]
+
+rule C_Refresh_Done:
+    [ C_RF(ch, k, a, aud), Resp_token(ch, <'token_resp', a, at, rt>) ]
+  --[ ClientRefreshDone(a, k) ]->
+    [ !ClientAT(k, a, aud, at), !ClientRT(k, a, rt) ]
+
+/* ======================================================================
+ * Resource access (§7; RFC 9449 §7): access token + DPoP proof with ath.
+ * ==================================================================== */
+
+rule C_RS_Request:
+    [ !ClientAT(k, a, 'rs', at)[no_precomp], Fr(~req), Fr(~jti) ]
+  --[ ClientRequest(k, ~req, at) ]->
+    [ RSReq(<'rs_request', ~req, at, DPOP(k, 'rs', h(at), ~jti)>) ]
+
+rule Adv_RS_Request:
+    [ In(m) ] --> [ RSReq(m) ]
+
+/* The honest resource server: AT signed by the published key, typ at+jwt,
+   aud = 'rs'; DPoP proof for htu 'rs' whose key thumbprint equals cnf.jkt
+   and whose ath is the hash of this access token.  The optional replay
+   cache and the optional revocation check (sid/cid/rid/epoch) are not
+   assumed. */
+rule RS_Accept [no_derivcheck]:
+  let at = AT(skAT, a, 'rs', h(pk(dk)), sd, cid, rid, ep, atj)
+  in
+    [ RSReq(<'rs_request', req, at, DPOP(dk, 'rs', h(at), jti)>),
+      !PkAT(pk(skAT))[no_precomp] ]
+  --[ RSAccept(a, h(pk(dk)), req, at), RSSession(a, sd, cid, rid, ep, h(pk(dk))) ]->
+    [ ]
+
+/* The honest client also calls resource servers run by the adversary,
+   which receive a DPoP proof for their own URI bound to the client's access
+   token (the token itself is covered by Leak_AccessToken). */
+rule C_Request_Malicious_RS:
+    [ !ClientAT(k, a, aud, at)[no_precomp], In(x), Fr(~jti) ]
+  --[ ClientEvilRSRequest() ]->
+    [ Out(DPOP(k, <'evil', x>, h(at), ~jti)) ]
+
+/* ======================================================================
+ * Account API (§10.7): resource endpoints at the auth service.  Each
+ * request carries an access token with aud = 'as' (AUTH_ISSUER) and a DPoP
+ * proof whose htu names the endpoint and whose ath binds the token.  Every
+ * request requires the session to be active: the token's passkey cid is
+ * still registered with registration ID rid (record not removed, current
+ * generation) and the account epoch equals the token's epoch (strongly
+ * consistent reads of META and CRED#).  Step-up (auth_time recency) is a
+ * timing check and is not modelled, so every active session passes it.
+ * ==================================================================== */
+
+rule AS_LogoutAll_H [no_derivcheck]:
+  let aid = uid(~a)
+      sidv = sid(~sid)
+      jkt = h(pk(~dk))
+      at  = AT(skAT, aid, 'as', jkt, sidv, credid(~cid), ~rec, ~e, atj)
+  in
+    [ Req_logout_all(~ch, <'logout_all', at, DPOP(~dk, 'as_logout_all', h(at), jti)>),
+      !ASKeys(skAT, skRT)[no_precomp],
+      Acct(~a, 'active', ~g, ~e, rch)[no_precomp],
+      !Cred(~rec, ~a, credid(~cid), ~g, pkc)[no_precomp],
+      Fr(~e2) ]
+  --[ DpopJti(jkt, jti),
+      CredUse(~rec), EpochRead(aid, ~e), GenRead(aid, ~g),
+      SessionUse(aid, sidv, credid(~cid), ~rec, ~e, jkt),
+      EpochChange(aid, ~e), EpochCreated(aid, ~e2), LogoutAll(aid, ~e) ]->
+    [ Acct(~a, 'active', ~g, ~e2, rch),
+      Resp_logout_all(~ch, <'logout_all_resp', aid>) ]
+
+rule AS_LogoutAll_A [no_derivcheck]:
+  let aid = uid(~a)
+      jkt = h(pk(dk))
+      at  = AT(skAT, aid, 'as', jkt, sid(~sid), cid, ~rec, ~e, atj)
+  in
+    [ In(<'logout_all', at, DPOP(dk, 'as_logout_all', h(at), jti)>),
+      !ASKeys(skAT, skRT)[no_precomp],
+      Acct(~a, 'active', ~g, ~e, rch)[no_precomp],
+      !Cred(~rec, ~a, cid, ~g, pkc)[no_precomp],
+      Fr(~e2) ]
+  --[ DpopJti(jkt, jti),
+      CredUse(~rec), EpochRead(aid, ~e), GenRead(aid, ~g),
+      AdvAct(aid), AdvTokenUse(aid, sid(~sid), cid, ~rec, ~e, jkt),
+      SessionUse(aid, sid(~sid), cid, ~rec, ~e, jkt),
+      EpochChange(aid, ~e), EpochCreated(aid, ~e2), LogoutAll(aid, ~e) ]->
+    [ Acct(~a, 'active', ~g, ~e2, rch),
+      Out(<'logout_all_resp', aid>) ]
+
+/* POST /v1/account/passkeys/options: the challenge is bound to the
+   account and to the caller's DPoP key. */
+rule AS_AddPasskey_Options_H [no_derivcheck]:
+  let aid = uid(~a)
+      sidv = sid(~sid)
+      jkt = h(pk(~dk))
+      at  = AT(skAT, aid, 'as', jkt, sidv, credid(~cid), ~rec, ~e, atj)
+  in
+    [ Req_passkey_options(~ch, <'passkey_options', at,
+                                 DPOP(~dk, 'as_passkey_options', h(at), jti)>),
+      !ASKeys(skAT, skRT)[no_precomp],
+      Acct(~a, 'active', ~g, ~e, rch)[no_precomp],
+      !Cred(~rec, ~a, credid(~cid), ~g, pkc)[no_precomp],
+      Fr(~c) ]
+  --[ DpopJti(jkt, jti), ChalIssued(chal(~c), jkt),
+      CredUse(~rec), EpochRead(aid, ~e), GenRead(aid, ~g),
+      SessionUse(aid, sidv, credid(~cid), ~rec, ~e, jkt) ]->
+    [ Acct(~a, 'active', ~g, ~e, rch),
+      Resp_passkey_options(~ch, <'passkey_options_resp', chal(~c), aid, 'rp'>),
+      Chal_add_passkey(chal(~c), 'add_passkey', ~a, jkt) ]
+
+rule AS_AddPasskey_Options_A [no_derivcheck]:
+  let aid = uid(~a)
+      jkt = h(pk(dk))
+      at  = AT(skAT, aid, 'as', jkt, sid(~sid), cid, ~rec, ~e, atj)
+  in
+    [ In(<'passkey_options', at, DPOP(dk, 'as_passkey_options', h(at), jti)>),
+      !ASKeys(skAT, skRT)[no_precomp],
+      Acct(~a, 'active', ~g, ~e, rch)[no_precomp],
+      !Cred(~rec, ~a, cid, ~g, pkc)[no_precomp],
+      Fr(~c) ]
+  --[ DpopJti(jkt, jti), ChalIssued(chal(~c), jkt),
+      CredUse(~rec), EpochRead(aid, ~e), GenRead(aid, ~g),
+      AdvAct(aid), AdvTokenUse(aid, sid(~sid), cid, ~rec, ~e, jkt),
+      SessionUse(aid, sid(~sid), cid, ~rec, ~e, jkt) ]->
+    [ Acct(~a, 'active', ~g, ~e, rch),
+      Out(<'passkey_options_resp', chal(~c), aid, 'rp'>),
+      Chal_add_passkey(chal(~c), 'add_passkey', ~a, jkt) ]
+
+/* The challenge must be of kind add_passkey, belong to the account named
+   by the access token (CHAL.account_id == sub) and be bound to the proof
+   key.  The new passkey gets a fresh registration ID. */
+rule AS_AddPasskey_Verify_H [no_derivcheck]:
+  let aid = uid(~a)
+      sidv = sid(~sid)
+      jkt = h(pk(~dk))
+      at  = AT(skAT, aid, 'as', jkt, sidv, credid(~cid), ~rec, ~e, atj)
+  in
+    [ Req_passkey_verify(~ch, <'passkey_verify', at,
+                DPOP(~dk, 'as_passkey_verify', h(at), jti),
+                REG(c, <'rp', 'app'>, 'rp', credid(~cid2), pkc2)>),
+      !ASKeys(skAT, skRT)[no_precomp],
+      Chal_add_passkey(c, 'add_passkey', ~a, jkt)[no_precomp],
+      Acct(~a, 'active', ~g, ~e, rch)[no_precomp],
+      !Cred(~rec, ~a, credid(~cid), ~g, pkc)[no_precomp],
+      Fr(~rec2) ]
+  --[ DpopJti(jkt, jti), ChalUsed(c, jkt),
+      CredUse(~rec), EpochRead(aid, ~e), GenRead(aid, ~g),
+      SessionUse(aid, sidv, credid(~cid), ~rec, ~e, jkt),
+      CredReg(aid, credid(~cid2), ~rec2, pkc2, ~g, 'h') ]->
+    [ Acct(~a, 'active', ~g, ~e, rch),
+      !Cred(~rec2, ~a, credid(~cid2), ~g, pkc2),
+      Resp_passkey_verify(~ch, <'passkey_verify_resp', aid, credid(~cid2)>) ]
+
+rule AS_AddPasskey_Verify_A [no_derivcheck]:
+  let aid = uid(~a)
+      jkt = h(pk(dk))
+      at  = AT(skAT, aid, 'as', jkt, sid(~sid), cid, ~rec, ~e, atj)
+  in
+    [ In(<'passkey_verify', at, DPOP(dk, 'as_passkey_verify', h(at), jti),
+          REG(c, <'rp', 'app'>, 'rp', cid2, pkc2)>),
+      !ASKeys(skAT, skRT)[no_precomp],
+      Chal_add_passkey(c, 'add_passkey', ~a, jkt)[no_precomp],
+      Acct(~a, 'active', ~g, ~e, rch)[no_precomp],
+      !Cred(~rec, ~a, cid, ~g, pkc)[no_precomp],
+      Fr(~rec2) ]
+  --[ DpopJti(jkt, jti), ChalUsed(c, jkt),
+      CredUse(~rec), EpochRead(aid, ~e), GenRead(aid, ~g),
+      AdvAct(aid), AdvTokenUse(aid, sid(~sid), cid, ~rec, ~e, jkt),
+      SessionUse(aid, sid(~sid), cid, ~rec, ~e, jkt),
+      CredReg(aid, cid2, ~rec2, pkc2, ~g, 'adv') ]->
+    [ Acct(~a, 'active', ~g, ~e, rch),
+      !Cred(~rec2, ~a, cid2, ~g, pkc2),
+      Out(<'passkey_verify_resp', aid, cid2>) ]
+
+/* DELETE /v1/account/passkeys/{cid}: the cid is part of the htu; the
+   target record must be registered on the account (current generation).
+   The last-passkey rule (availability only) is not modelled. */
+rule AS_RemovePasskey_H [no_derivcheck]:
+  let aid = uid(~a)
+      sidv = sid(~sid)
+      jkt = h(pk(~dk))
+      at  = AT(skAT, aid, 'as', jkt, sidv, credid(~cid), ~rec, ~e, atj)
+  in
+    [ Req_passkey_delete(~ch, <'passkey_delete', credid(~tcid), at,
+                DPOP(~dk, <'as_passkey_delete', credid(~tcid)>, h(at), jti)>),
+      !ASKeys(skAT, skRT)[no_precomp],
+      Acct(~a, 'active', ~g, ~e, rch)[no_precomp],
+      !Cred(~rec, ~a, credid(~cid), ~g, pkc)[no_precomp],
+      !Cred(~trec, ~a, credid(~tcid), ~g, tpk)[no_precomp] ]
+  --[ DpopJti(jkt, jti),
+      CredUse(~rec), EpochRead(aid, ~e), GenRead(aid, ~g),
+      SessionUse(aid, sidv, credid(~cid), ~rec, ~e, jkt),
+      CredUse(~trec), CredRemoved(~trec), PasskeyRemoved(aid, credid(~tcid), ~trec) ]->
+    [ Acct(~a, 'active', ~g, ~e, rch),
+      Resp_passkey_delete(~ch, <'passkey_delete_resp', aid, credid(~tcid)>) ]
+
+rule AS_RemovePasskey_A [no_derivcheck]:
+  let aid = uid(~a)
+      jkt = h(pk(dk))
+      at  = AT(skAT, aid, 'as', jkt, sid(~sid), cid, ~rec, ~e, atj)
+  in
+    [ In(<'passkey_delete', tcid, at, DPOP(dk, <'as_passkey_delete', tcid>, h(at), jti)>),
+      !ASKeys(skAT, skRT)[no_precomp],
+      Acct(~a, 'active', ~g, ~e, rch)[no_precomp],
+      !Cred(~rec, ~a, cid, ~g, pkc)[no_precomp],
+      !Cred(~trec, ~a, tcid, ~g, tpk)[no_precomp] ]
+  --[ DpopJti(jkt, jti),
+      CredUse(~rec), EpochRead(aid, ~e), GenRead(aid, ~g),
+      AdvAct(aid), AdvTokenUse(aid, sid(~sid), cid, ~rec, ~e, jkt),
+      SessionUse(aid, sid(~sid), cid, ~rec, ~e, jkt),
+      CredUse(~trec), CredRemoved(~trec), PasskeyRemoved(aid, tcid, ~trec) ]->
+    [ Acct(~a, 'active', ~g, ~e, rch),
+      Out(<'passkey_delete_resp', aid, tcid>) ]
+
+rule AS_RotateRecoveryCode_H [no_derivcheck]:
+  let aid = uid(~a)
+      sidv = sid(~sid)
+      jkt = h(pk(~dk))
+      at  = AT(skAT, aid, 'as', jkt, sidv, credid(~cid), ~rec, ~e, atj)
+  in
+    [ Req_recovery_code(~ch, <'recovery_code', at, DPOP(~dk, 'as_recovery_code', h(at), jti)>),
+      !ASKeys(skAT, skRT)[no_precomp],
+      Acct(~a, 'active', ~g, ~e, rch)[no_precomp],
+      !Cred(~rec, ~a, credid(~cid), ~g, pkc)[no_precomp],
+      Fr(~rc) ]
+  --[ DpopJti(jkt, jti),
+      CredUse(~rec), EpochRead(aid, ~e), GenRead(aid, ~g),
+      SessionUse(aid, sidv, credid(~cid), ~rec, ~e, jkt),
+      RecoveryCodeRotated(aid) ]->
+    [ Acct(~a, 'active', ~g, ~e, h(rcode(~rc))),
+      !RecIdx(h(rcode(~rc)), ~a),
+      Resp_recovery_code(~ch, <'recovery_code_resp', aid, rcode(~rc)>) ]
+
+rule AS_RotateRecoveryCode_A [no_derivcheck]:
+  let aid = uid(~a)
+      jkt = h(pk(dk))
+      at  = AT(skAT, aid, 'as', jkt, sid(~sid), cid, ~rec, ~e, atj)
+  in
+    [ In(<'recovery_code', at, DPOP(dk, 'as_recovery_code', h(at), jti)>),
+      !ASKeys(skAT, skRT)[no_precomp],
+      Acct(~a, 'active', ~g, ~e, rch)[no_precomp],
+      !Cred(~rec, ~a, cid, ~g, pkc)[no_precomp],
+      Fr(~rc) ]
+  --[ DpopJti(jkt, jti),
+      CredUse(~rec), EpochRead(aid, ~e), GenRead(aid, ~g),
+      AdvAct(aid), AdvTokenUse(aid, sid(~sid), cid, ~rec, ~e, jkt),
+      SessionUse(aid, sid(~sid), cid, ~rec, ~e, jkt),
+      RecoveryCodeRotated(aid) ]->
+    [ Acct(~a, 'active', ~g, ~e, h(rcode(~rc))),
+      !RecIdx(h(rcode(~rc)), ~a),
+      Out(<'recovery_code_resp', aid, rcode(~rc)>) ]
+
+/* DELETE /v1/account: every item of the account is deleted (the account
+   record is consumed; the epoch is gone, which EpochChange records). */
+rule AS_DeleteAccount_H [no_derivcheck]:
+  let aid = uid(~a)
+      sidv = sid(~sid)
+      jkt = h(pk(~dk))
+      at  = AT(skAT, aid, 'as', jkt, sidv, credid(~cid), ~rec, ~e, atj)
+  in
+    [ Req_account_delete(~ch, <'account_delete', at, DPOP(~dk, 'as_account_delete', h(at), jti)>),
+      !ASKeys(skAT, skRT)[no_precomp],
+      Acct(~a, 'active', ~g, ~e, rch)[no_precomp],
+      !Cred(~rec, ~a, credid(~cid), ~g, pkc)[no_precomp] ]
+  --[ DpopJti(jkt, jti),
+      CredUse(~rec), EpochRead(aid, ~e), GenRead(aid, ~g),
+      SessionUse(aid, sidv, credid(~cid), ~rec, ~e, jkt),
+      EpochChange(aid, ~e), AccountDeleted(aid) ]->
+    [ Resp_account_delete(~ch, <'account_delete_resp', aid>) ]
+
+rule AS_DeleteAccount_A [no_derivcheck]:
+  let aid = uid(~a)
+      jkt = h(pk(dk))
+      at  = AT(skAT, aid, 'as', jkt, sid(~sid), cid, ~rec, ~e, atj)
+  in
+    [ In(<'account_delete', at, DPOP(dk, 'as_account_delete', h(at), jti)>),
+      !ASKeys(skAT, skRT)[no_precomp],
+      Acct(~a, 'active', ~g, ~e, rch)[no_precomp],
+      !Cred(~rec, ~a, cid, ~g, pkc)[no_precomp] ]
+  --[ DpopJti(jkt, jti),
+      CredUse(~rec), EpochRead(aid, ~e), GenRead(aid, ~g),
+      AdvAct(aid), AdvTokenUse(aid, sid(~sid), cid, ~rec, ~e, jkt),
+      SessionUse(aid, sid(~sid), cid, ~rec, ~e, jkt),
+      EpochChange(aid, ~e), AccountDeleted(aid) ]->
+    [ Out(<'account_delete_resp', aid>) ]
+
+/* Honest client side of the account API (uses an access token for 'as'). */
+
+rule C_LogoutAll:
+    [ !ClientAT(k, a, 'as', at)[no_precomp], Fr(~jti), Fr(~ch) ]
+  -->
+    [ Req_logout_all(~ch, <'logout_all', at, DPOP(k, 'as_logout_all', h(at), ~jti)>),
+      C_LO(~ch, a) ]
+
+rule C_LogoutAll_Done:
+    [ C_LO(ch, a), Resp_logout_all(ch, <'logout_all_resp', a>) ]
+  --[ ClientLogoutAllDone(a) ]->
+    [ ]
+
+rule C_AddPasskey_Options:
+    [ !ClientAT(k, a, 'as', at)[no_precomp], Fr(~jti), Fr(~ch) ]
+  -->
+    [ Req_passkey_options(~ch, <'passkey_options', at, DPOP(k, 'as_passkey_options', h(at), ~jti)>),
+      C_AP1(~ch, k, a, at) ]
+
+rule C_AddPasskey_Create [no_derivcheck]:
+  let c = chal(~c)
+      cid = credid(~cid)
+      resp = REG(c, <'rp', 'app'>, 'rp', cid, pk(~skc))
+  in
+    [ C_AP1(ch, k, a, at), Resp_passkey_options(ch, <'passkey_options_resp', c, a, 'rp'>),
+      NewCred(cid, ~skc), Fr(~jti), Fr(~ch2) ]
+  --[ ClientChal(k, c), ClientNewPasskey(a, cid, 'add') ]->
+    [ !Passkey('rp', a, cid, ~skc),
+      Out(resp),
+      Req_passkey_verify(~ch2, <'passkey_verify', at, DPOP(k, 'as_passkey_verify', h(at), ~jti),
+                                resp>),
+      C_AP2(~ch2, a, cid) ]
+
+rule C_AddPasskey_Done:
+    [ C_AP2(ch, a, cid), Resp_passkey_verify(ch, <'passkey_verify_resp', a, cid>) ]
+  --[ ClientPasskeyAdded(a, cid) ]->
+    [ ]
+
+rule C_RemovePasskey:
+    [ !ClientAT(k, a, 'as', at)[no_precomp], !Passkey('rp', a, cid, skc)[no_precomp],
+      Fr(~jti), Fr(~ch) ]
+  -->
+    [ Req_passkey_delete(~ch, <'passkey_delete', cid, at,
+                DPOP(k, <'as_passkey_delete', cid>, h(at), ~jti)>),
+      C_RP(~ch, a, cid) ]
+
+rule C_RemovePasskey_Done:
+    [ C_RP(ch, a, cid), Resp_passkey_delete(ch, <'passkey_delete_resp', a, cid>) ]
+  --[ ClientPasskeyRemoved(a, cid) ]->
+    [ ]
+
+rule C_RotateRecoveryCode:
+    [ !ClientAT(k, a, 'as', at)[no_precomp], Fr(~jti), Fr(~ch) ]
+  -->
+    [ Req_recovery_code(~ch, <'recovery_code', at, DPOP(k, 'as_recovery_code', h(at), ~jti)>),
+      C_RR(~ch, a) ]
+
+rule C_RotateRecoveryCode_Done:
+    [ C_RR(ch, a), Resp_recovery_code(ch, <'recovery_code_resp', a, rc>) ]
+  --[ ClientRecoveryCodeRotated(a) ]->
+    [ !RecCode(a, rc) ]
+
+rule C_DeleteAccount:
+    [ !ClientAT(k, a, 'as', at)[no_precomp], Fr(~jti), Fr(~ch) ]
+  -->
+    [ Req_account_delete(~ch, <'account_delete', at, DPOP(k, 'as_account_delete', h(at), ~jti)>),
+      C_DA(~ch, a) ]
+
+rule C_DeleteAccount_Done:
+    [ C_DA(ch, a), Resp_account_delete(ch, <'account_delete_resp', a>) ]
+  --[ ClientAccountDeleted(a) ]->
+    [ ]
+
+/* ======================================================================
+ * Recovery (§9, §10.6)
+ * ==================================================================== */
+
+rule C_Recover_Options:
+    [ !RecCode(a, rc)[no_precomp], !DeviceKey(k)[no_precomp], Fr(~ch), Fr(~jti) ]
+  -->
+    [ Req_recover_options(~ch, <'recover_options', rc,
+                                DPOP(k, 'as_recover_options', 'none', ~jti)>),
+      C_RC1(~ch, k, a) ]
+
+/* Lookup via RECOVERY#<hash>; the challenge is bound to the code (its hash)
+   and to the proof key; the code is consumed only at verify time, where it
+   must still be the account's current code. */
+rule AS_Recover_Options_H [no_derivcheck]:
+  let aid = uid(~a)
+      jkt = h(pk(~dk))
+  in
+    [ Req_recover_options(~ch, <'recover_options', rc,
+                                DPOP(~dk, 'as_recover_options', 'none', jti)>),
+      !RecIdx(h(rc), ~a)[no_precomp], Fr(~c) ]
+  --[ DpopJti(jkt, jti), ChalIssued(chal(~c), jkt) ]->
+    [ Resp_recover_options(~ch, <'recover_options_resp', chal(~c), aid, 'rp'>),
+      Chal_recover(chal(~c), 'recover', <~a, h(rc)>, jkt) ]
+
+rule AS_Recover_Options_A [no_derivcheck]:
+  let aid = uid(~a)
+      jkt = h(pk(dk))
+  in
+    [ In(<'recover_options', rc, DPOP(dk, 'as_recover_options', 'none', jti)>),
+      !RecIdx(h(rc), ~a)[no_precomp], Fr(~c) ]
+  --[ DpopJti(jkt, jti), ChalIssued(chal(~c), jkt),
+      AdvAct(aid), AdvRecoverOptions(aid) ]->
+    [ Out(<'recover_options_resp', chal(~c), aid, 'rp'>),
+      Chal_recover(chal(~c), 'recover', <~a, h(rc)>, jkt) ]
+
+rule C_Recover_Create [no_derivcheck]:
+  let c = chal(~c)
+      cid = credid(~cid)
+      resp = REG(c, <'rp', 'app'>, 'rp', cid, pk(~skc))
+  in
+    [ C_RC1(ch, k, a), Resp_recover_options(ch, <'recover_options_resp', c, a, 'rp'>),
+      NewCred(cid, ~skc), Fr(~jti), Fr(~ch2) ]
+  --[ ClientCeremony(a, k, c), ClientChal(k, c), ClientNewPasskey(a, cid, 'recover') ]->
+    [ !Passkey('rp', a, cid, ~skc),
+      Out(resp),
+      Req_recover_verify(~ch2, <'recover_verify', $aud, resp,
+                                DPOP(k, 'as_recover', 'none', ~jti)>),
+      C_RC2(~ch2, k, a, $aud) ]
+
+/* Atomic: the challenge is bound to the proof key; the code bound to the
+   challenge must still be current; every passkey is replaced (new
+   credential generation), the epoch is incremented, the new passkey
+   registered with a fresh registration ID and a new code issued. */
+rule AS_Recover_Verify_H [no_derivcheck]:
+  let aid = uid(~a)
+      sidv = sid(~sid)
+      jkt = h(pk(~dk))
+      at  = AT(skAT, aid, $aud, jkt, sidv, credid(~cid), ~rec, ~e2, ~atj)
+      rt  = RT(skRT, aid, sidv, credid(~cid), ~rec, ~e2, jkt, ~rtj)
+  in
+    [ Req_recover_verify(~ch, <'recover_verify', $aud,
+                REG(c, <'rp', 'app'>, 'rp', credid(~cid), pkc),
+                DPOP(~dk, 'as_recover', 'none', jti)>),
+      Chal_recover(c, 'recover', <~a, rch>, jkt)[no_precomp],
+      Acct(~a, 'active', ~g, ~e, rch)[no_precomp],
+      !ASKeys(skAT, skRT)[no_precomp],
+      Fr(~rec), Fr(~sid), Fr(~rc), Fr(~atj), Fr(~rtj), Fr(~e2), Fr(~g2) ]
+  --[ DpopJti(jkt, jti), ChalUsed(c, jkt),
+      EpochRead(aid, ~e), GenRead(aid, ~g), EpochChange(aid, ~e), GenChange(aid, ~g),
+      EpochCreated(aid, ~e2), GenCreated(aid, ~g2),
+      Recovered(aid, ~g, ~e),
+      CredReg(aid, credid(~cid), ~rec, pkc, ~g2, 'h'),
+      SessionStart(aid, sidv, credid(~cid), ~rec, ~e2, jkt, 'h') ]->
+    [ Acct(~a, 'active', ~g2, ~e2, h(rcode(~rc))),
+      !Cred(~rec, ~a, credid(~cid), ~g2, pkc),
+      !RecIdx(h(rcode(~rc)), ~a),
+      !IssuedTokens(~a, $aud, pk(~dk), ~atj, ~sid, credid(~cid), ~rec, ~e2, ~rtj),
+      Resp_recover_verify(~ch, <'recover_verify_resp', aid, at, rt, rcode(~rc)>) ]
+
+rule AS_Recover_Verify_A [no_derivcheck]:
+  let aid = uid(~a)
+      sidv = sid(~sid)
+      jkt = h(pk(dk))
+      at  = AT(skAT, aid, $aud, jkt, sidv, cid, ~rec, ~e2, ~atj)
+      rt  = RT(skRT, aid, sidv, cid, ~rec, ~e2, jkt, ~rtj)
+  in
+    [ In(<'recover_verify', $aud,
+          REG(c, <'rp', 'app'>, 'rp', cid, pkc),
+          DPOP(dk, 'as_recover', 'none', jti)>),
+      Chal_recover(c, 'recover', <~a, rch>, jkt)[no_precomp],
+      Acct(~a, 'active', ~g, ~e, rch)[no_precomp],
+      !ASKeys(skAT, skRT)[no_precomp],
+      Fr(~rec), Fr(~sid), Fr(~rc), Fr(~atj), Fr(~rtj), Fr(~e2), Fr(~g2) ]
+  --[ DpopJti(jkt, jti), ChalUsed(c, jkt),
+      EpochRead(aid, ~e), GenRead(aid, ~g), EpochChange(aid, ~e), GenChange(aid, ~g),
+      EpochCreated(aid, ~e2), GenCreated(aid, ~g2), AdvAct(aid), AdvCeremony(aid, c, jkt),
+      Recovered(aid, ~g, ~e),
+      CredReg(aid, cid, ~rec, pkc, ~g2, 'adv'),
+      SessionStart(aid, sidv, cid, ~rec, ~e2, jkt, 'adv') ]->
+    [ Acct(~a, 'active', ~g2, ~e2, h(rcode(~rc))),
+      !Cred(~rec, ~a, cid, ~g2, pkc),
+      !RecIdx(h(rcode(~rc)), ~a),
+      Out(<'recover_verify_resp', aid, at, rt, rcode(~rc)>) ]
+
+rule C_Recover_Done:
+    [ C_RC2(ch, k, a, aud), Resp_recover_verify(ch, <'recover_verify_resp', a, at, rt, rc>) ]
+  --[ ClientRecoveryDone(a, k) ]->
+    [ !ClientAT(k, a, aud, at), !ClientRT(k, a, rt), !RecCode(a, rc) ]
+
+/* ======================================================================
+ * Phishing.  Origins are <registrable domain, host>.  The RP ID is 'rp' and
+ * the only honest origin (AUTH_ALLOWED_ORIGINS) is <'rp', 'app'>.
+ *
+ * Honest configuration (§8 "RP ID scope", a deployment requirement): every
+ * host under the RP ID is operator-controlled, so attacker pages live on
+ * attacker registrable domains <'evil', y>, origin <<'evil', y>, <'evil', x>>.
+ * The page drives the user's browser and platform authenticator: the browser
+ * only allows the page's own registrable domain as RP ID and writes the true
+ * origin into clientDataJSON; the authenticator scopes credentials to that
+ * RP ID and signs rpIdHash = h(RP ID).  The user approves every prompt.
+ * (Script injection into the honest origin itself is covered by the passkey
+ * and device compromise rules.)  The ATTACKS configuration adds hostile
+ * pages *inside* the RP ID scope (origin <'rp', <'evil', x>>).
+ * ==================================================================== */
+
+/* Planting: the page makes the platform create a credential (with an
+   attacker-chosen user handle) and receives the attestation object. */
+rule Phish_Create:
+    [ In(<y, x, uh>), NewCred(cid, ~sk) ]
+  --[ Planted(uh, cid) ]->
+    [ !Passkey(<'evil', y>, uh, cid, ~sk) ]
+
+/* Relaying: the page obtains an assertion over any challenge it likes from
+   any credential scoped to its RP ID.  Account IDs are public in this model
+   (see AS_Register_Options_H), so naming uh in the request does not
+   restrict the adversary. */
+rule Phish_Assert [no_derivcheck]:
+    [ !Passkey(<'evil', y>, uh, credid(~cid), ~sk)[no_precomp], In(<y, x, c, uh>) ]
+  --[ Asserted(pk(~sk), c, <'evil', y>, <<'evil', y>, <'evil', x>>, 'none') ]->
+    [ Out(ASSERTION(credid(~cid), <'evil', y>, c, <<'evil', y>, <'evil', x>>, ~sk, uh)) ]
+
+/* ======================================================================
+ * Compromise rules (each recorded by an action fact).
+ * ==================================================================== */
+
+/* Token theft: any access or refresh token issued to an honest client
+   (e.g. read by injected script, logged, or taken from storage).  The
+   server records the claims of every token it hands to an honest client;
+   the leak rule re-assembles exactly that signed token. */
+rule Leak_AccessToken [no_derivcheck]:
+  let at = AT(skAT, uid(~a), $aud, h(pk(~dk)), sid(~sid), credid(~cid), ~rec, ~e, ~atj)
+  in
+    [ !IssuedTokens(~a, $aud, pk(~dk), ~atj, ~sid, credid(~cid), ~rec, ~e, ~rtj)[no_precomp],
+      !ASKeys(skAT, skRT)[no_precomp] ]
+  --[ LeakAT(uid(~a), at) ]->
+    [ Out(at) ]
+
+rule Leak_RefreshToken [no_derivcheck]:
+  let rt = RT(skRT, uid(~a), sid(~sid), credid(~cid), ~rec, ~e, h(pk(~dk)), ~rtj)
+  in
+    [ !IssuedTokens(~a, $aud, pk(~dk), ~atj, ~sid, credid(~cid), ~rec, ~e, ~rtj)[no_precomp],
+      !ASKeys(skAT, skRT)[no_precomp] ]
+  --[ LeakRT(uid(~a), rt) ]->
+    [ Out(rt) ]
+
+rule Compromise_Device:
+    [ !DeviceKey(~k) ] --[ CompromiseDevice(~k) ]-> [ Out(~k) ]
+
+rule Compromise_Passkey:
+    [ !Passkey(r, uh, cid, ~sk) ] --[ CompromisePasskey(uh, pk(~sk)) ]-> [ Out(~sk) ]
+
+rule Leak_RecoveryCode [no_derivcheck]:
+    [ !RecCode(a, rcode(~rc)) ] --[ LeakRecovery(a) ]-> [ Out(rcode(~rc)) ]
+
+#ifdef ATTACKS
+/* ======================================================================
+ * Capabilities outside the honest configuration (ATTACKS only).
+ * ==================================================================== */
+
+/* Server signing-key compromise (KMS keys are trusted otherwise). */
+rule Compromise_AS_AccessTokenKey:
+    [ !ASKeys(~skAT, ~skRT) ] --[ ServerKeyCompromise('at') ]-> [ Out(~skAT) ]
+
+rule Compromise_AS_RefreshTokenKey:
+    [ !ASKeys(~skAT, ~skRT) ] --[ ServerKeyCompromise('rt') ]-> [ Out(~skRT) ]
+
+/* A hostile page *inside* the RP ID scope (a sibling sub-domain of the RP
+   ID that is not under the operator's control), violating the deployment
+   requirement of §8 "RP ID scope".  The browser lets it use RP ID 'rp'. */
+rule Phish_Create_InScope:
+    [ In(<x, uh>), NewCred(cid, ~sk) ]
+  --[ Planted(uh, cid), HostileInScopePage() ]->
+    [ !Passkey('rp', uh, cid, ~sk) ]
+
+rule Phish_Assert_InScope [no_derivcheck]:
+    [ !Passkey('rp', uh, credid(~cid), ~sk)[no_precomp], In(<x, c, uh>) ]
+  --[ Asserted(pk(~sk), c, 'rp', <'rp', <'evil', x>>, 'none'), HostileInScopePage() ]->
+    [ Out(ASSERTION(credid(~cid), 'rp', c, <'rp', <'evil', x>>, ~sk, uh)) ]
+#endif
+
+/* ======================================================================
+ * Proof strategy.  Goal-ranking tactics: Tamarin's built-in "smart" ranking
+ * ("presort: s") refined by regex priorities on the goal text, selected per
+ * lemma with heuristic={...}.  They only change the ORDER in which goals
+ * are solved, never what is proved; no external oracle is used.
+ *   no_state      solve knowledge of fresh secrets first and server-state
+ *                 premises (account record, credential items, challenges,
+ *                 recovery index) last;
+ *   no_account    as no_state, but challenge items and requests are not
+ *                 deprioritised (for lemmas about ceremonies);
+ *   tokens        as no_state, but first the origin of tokens and DPoP
+ *                 proofs, and client-held state last;
+ *   signin        first the credential record read at #i, fresh keys and
+ *                 DPoP proofs by honest device keys;
+ *   ceremony      first DPoP proofs by honest device keys and fresh keys,
+ *                 client-held state last;
+ *   combine       for the induction that chains the step lemmas: the
+ *                 lemma's own adversary action, then the case splits;
+ *   dpop          first the DPoP proof, then the device key;
+ *   actions_first the lemma's own actions and case splits first;
+ *   revocation    the session use first, then the lemma's other actions;
+ *                 state and client premises last;
+ *   assertion     first the authenticator signature and the challenge;
+ *   assertion_bound  as assertion, then the challenge item and the
+ *                 sign-in request/response that carried it;
+ *   chal          first the challenge item a verify request consumes;
+ *   binding       the challenge item, then the client's options request
+ *                 and the server's response that carried the challenge;
+ *   state_chain   for the account-state invariants: the lemma's own
+ *                 actions and the account record read at #r first.
+ * ==================================================================== */
+
+tactic: no_state
+presort: s
+prio:
+  regex "^!KU\( (~|chal\(~|rcode\(~)"
+deprio:
+  regex "^(Acct|!Cred|Chal_[a-z_]+|!RecIdx)\("
+deprio:
+  regex "^!KU\( (revealSign\(<'dpop\+jwt', pk\([a-z]|tid\(|pk\(|h\(pk)"
+
+tactic: no_account
+presort: s
+prio:
+  regex "^!KU\( (~|chal\(~|rcode\(~)"
+deprio:
+  regex "^(Acct|!Cred|!RecIdx)\("
+deprio:
+  regex "^!KU\( (revealSign\(<'dpop\+jwt', pk\([a-z]|tid\(|pk\(|h\(pk)"
+
+tactic: tokens
+presort: s
+prio:
+  regex "^!KU\( revealSign"
+prio:
+  regex "^!KU\( ~"
+deprio:
+  regex "^(Acct|!Cred|Chal_[a-z_]+|!RecIdx|!Passkey|!ClientAT|!ClientRT|!RecCode)\("
+
+tactic: signin
+presort: s
+prio:
+  regex "^!Cred\(.*#i$"
+prio:
+  regex "^!KU\( ~"
+prio:
+  regex "^!KU\( revealSign\(<'dpop\+jwt', pk\(~"
+deprio:
+  regex "^(Acct|!RecIdx|!Cred|!ClientAT|!ClientRT|!RecCode)\("
+deprio:
+  regex "^!KU\( (h\(|pk\(|revealSign|tid\(|uid\(|credid\(|sid\()"
+
+tactic: ceremony
+presort: s
+prio:
+  regex "^!KU\( revealSign\(<'dpop\+jwt', pk\(~"
+prio:
+  regex "^!KU\( ~"
+deprio:
+  regex "^(!RecCode|!ClientAT|!ClientRT|!Passkey|!RecIdx|Acct|!Cred)\("
+deprio:
+  regex "^!KU\( (revealSign\(<'dpop\+jwt', pk\([a-z]|tid\(|pk\(|h\(pk)"
+
+tactic: combine
+presort: s
+prio:
+  regex "^AdvAct\(.*#i$"
+prio:
+  regex "∥"
+deprio:
+  regex "^(!KU|Acct|Chal_|!RecIdx|!Cred|!Passkey|!ClientAT|!ClientRT|!RecCode|C_|Req_|Resp_|!ASKeys|!PkAT|NewCred|!DeviceKey)"
+
+tactic: dpop
+presort: s
+prio:
+  regex "^!KU\( revealSign\(<'dpop\+jwt'"
+prio:
+  regex "^!KU\( ~"
+deprio:
+  regex "^!KU\( revealSign"
+deprio:
+  regex "^(Acct|!Cred|Chal_[a-z_]+|!RecIdx|!Passkey|!ClientAT|!ClientRT|!RecCode)\("
+
+tactic: actions_first
+presort: s
+prio:
+  regex "@ #[a-z]+$"
+prio:
+  regex "∥"
+prio:
+  regex "^!Cred\(.*#j$"
+deprio:
+  regex "^(!KU|Acct|Chal_|!RecIdx|!Cred|!Passkey|!ClientAT|!ClientRT|!RecCode|C_|Req_|Resp_|!ASKeys|!PkAT|NewCred|!DeviceKey)"
+
+tactic: revocation
+presort: s
+prio:
+  regex "^SessionUse\(.*@ #[a-z]+$"
+prio:
+  regex "@ #[a-z]+$"
+prio:
+  regex "∥"
+deprio:
+  regex "^(!KU|Acct|Chal_|!RecIdx|!Cred|!Passkey|!ClientAT|!ClientRT|!RecCode|C_|Req_|Resp_|!ASKeys|!PkAT|NewCred|!DeviceKey|!IssuedTokens)"
+
+tactic: assertion
+presort: s
+prio:
+  regex "@ #[a-z]+$"
+prio:
+  regex "^!KU\( sign\("
+prio:
+  regex "^!KU\( (~|chal\(~)"
+prio:
+  regex "∥"
+deprio:
+  regex "^(!KU|Acct|Chal_|!RecIdx|!Cred|!Passkey|!ClientAT|!ClientRT|!RecCode|C_|Req_|Resp_|!ASKeys|!PkAT|NewCred|!DeviceKey)"
+
+tactic: chal
+presort: s
+prio:
+  regex "^Chal_"
+deprio:
+  regex "^(!KU|Acct|!Cred|!RecIdx|!Passkey|!ClientAT|!ClientRT|!RecCode|!ASKeys|C_|Req_|Resp_)"
+
+tactic: binding
+presort: s
+prio:
+  regex "^Chal_"
+prio:
+  regex "^(Resp_|Req_)"
+deprio:
+  regex "^(!KU|Acct|!Cred|!RecIdx|!Passkey|!ClientAT|!ClientRT|!RecCode|!ASKeys|NewCred)"
+
+tactic: assertion_bound
+presort: s
+prio:
+  regex "@ #[a-z]+$"
+prio:
+  regex "^!KU\( sign\("
+prio:
+  regex "^!KU\( (~|chal\(~)"
+prio:
+  regex "∥"
+prio:
+  regex "^(Chal_|Resp_login|Req_login)"
+deprio:
+  regex "^(!KU|Acct|!RecIdx|!Cred|!Passkey|!ClientAT|!ClientRT|!RecCode|C_|Req_|Resp_|!ASKeys|!PkAT|NewCred|!DeviceKey)"
+
+tactic: state_chain
+presort: s
+prio:
+  regex "^(EpochRead|GenRead)\(.*@ #r$"
+prio:
+  regex "^Acct\(.*#r$"
+prio:
+  regex "^(EpochChange|GenChange)\(.*@ #l$"
+prio:
+  regex "^(EpochCreated|GenCreated)\(.*@ #c$"
+prio:
+  regex "∥"
+deprio:
+  regex "^(Chal_|!Cred|!KU|Req_|Resp_|!ASKeys|!RecIdx|!Passkey|!PkAT|C_|Acct|!RecCode|!ClientAT|!ClientRT|!DeviceKey|NewCred|!IssuedTokens)"
+
+/* ======================================================================
+ * Lemmas proved in both configurations
+ * ==================================================================== */
+
+/* A passkey private key is only known after an explicit compromise. */
+lemma passkey_secret [use_induction, reuse]:
+  "All sk #i #j. PlatformKey(pk(sk))@i & K(sk)@j
+      ==> Ex u #c. CompromisePasskey(u, pk(sk))@c & #c < #j"
+
+/* Phishing resistance: every sign-in accepted with a platform credential
+   used an assertion that the user's authenticator produced at the honest
+   origin for the honest RP ID -- never one produced for a page at another
+   origin -- unless that passkey was compromised.  In the ATTACKS
+   configuration this includes hostile pages inside the RP ID scope (sign-in
+   is not affected by them; only registration is, see A3). */
+lemma phishing_resistance [heuristic={assertion}]:
+  "All a cid pk c rec jkt #i #p.
+      AcceptAssertion(a, cid, pk, c, rec, jkt)@i & PlatformKey(pk)@p
+      ==> (Ex kk #j. Asserted(pk, c, 'rp', <'rp', 'app'>, kk)@j & #j < #i)
+        | (Ex u #k. CompromisePasskey(u, pk)@k)"
+
+#ifdef ATTACKS
+/* ======================================================================
+ * ATTACK / LIMIT WITNESSES (run with -D=ATTACKS).
+ * Each lemma below is an exists-trace lemma: "verified" means Tamarin found
+ * the trace.  The extra adversary capabilities are only enabled in this
+ * configuration.
+ * ==================================================================== */
+
+predicates:
+  NoAccountCompromise(a) <=>
+      not (Ex k c #i #j. CompromiseDevice(k)@i & ClientCeremony(a, k, c)@j)
+    & not (Ex u p #i. CompromisePasskey(u, p)@i)
+    & not (Ex #i. LeakRecovery(a)@i)
+
+/* Scenario restrictions shared by the witnesses below: they only narrow
+   down which trace Tamarin reports (fewer, shorter honest runs); the attack
+   conditions themselves are stated explicitly in each lemma. */
+predicates:
+  OnlySignUpSessions() <=>
+      not (Ex x k #m. ClientLoginDone(x, k)@m)
+    & not (Ex x k #m. ClientRecoveryDone(x, k)@m)
+    & not (Ex x c #m. ClientNewPasskey(x, c, 'add')@m)
+    & not (Ex x c #m. ClientNewPasskey(x, c, 'recover')@m),
+  QuietAccounts() <=>
+      not (Ex x g #m. GenChange(x, g)@m)
+    & not (Ex x #m. RecoveryCodeRotated(x)@m)
+    & not (Ex x #m. AccountDeleted(x)@m)
+    & not (Ex x e #m. EpochChange(x, e)@m)
+    & not (Ex x c r #m. PasskeyRemoved(x, c, r)@m),
+  NoAdvSignInOrRecovery() <=>
+      not (Ex x p c j #m. AdvSignIn(x, p, c, j)@m)
+    & not (Ex x #m. AdvRecoverOptions(x)@m)
+    & not (Ex x c j #m. AdvCeremony(x, c, j)@m),
+  AtMostTwoSessionUses() <=>
+      All a1 s1 c1 r1 e1 j1 a2 s2 c2 r2 e2 j2 a3 s3 c3 r3 e3 j3 #m1 #m2 #m3.
+        SessionUse(a1, s1, c1, r1, e1, j1)@m1 & SessionUse(a2, s2, c2, r2, e2, j2)@m2
+      & SessionUse(a3, s3, c3, r3, e3, j3)@m3
+        ==> #m1 = #m2 | #m1 = #m3 | #m2 = #m3
+
+/* A1. With the access-token signing key, the adversary forges an access
+   token for an honest, uncompromised account bound to its own DPoP key and
+   the resource server accepts it (resource_access_authentication fails). */
+lemma attack_at_key_compromise_breaks_resource_auth: exists-trace
+  "Ex a jkt req at #i #h.
+      RSAccept(a, jkt, req, at)@i & HonestAccount(a)@h
+    & not (Ex k c #j. ClientCeremony(a, k, c)@j & jkt = h(pk(k)))
+    & NoAccountCompromise(a)
+    & not (Ex #j. ServerKeyCompromise('rt')@j)
+    & not (Ex #j. HostileInScopePage()@j)
+    & not (Ex x #j. AdvAct(x)@j)
+    & not (Ex x t #j. LeakAT(x, t)@j)
+    & not (Ex x t #j. LeakRT(x, t)@j)
+    & not (Ex x k #m. ClientSignUpDone(x, k)@m) & OnlySignUpSessions()
+    & not (Ex x k #m. ClientRefreshDone(x, k)@m)"
+
+/* A2. With the refresh-token signing key, the adversary mints a refresh
+   token for an honest, uncompromised account bound to its own DPoP key and
+   the auth service accepts it: a full session takeover.  The forged token
+   must carry the account's current epoch and a credential ID with its
+   current registration ID (rule 5), here taken from a leaked refresh token;
+   in the deployed system the epoch is a small counter, but the registration
+   ID is 16 random bytes, so the adversary needs a token of the account. */
+lemma attack_rt_key_compromise_hijacks_session: exists-trace
+  "Ex a sd cid rid ep jkt #i #h.
+      AcceptRefresh(a, sd, cid, rid, ep, jkt)@i & HonestAccount(a)@h
+    & (Ex k0 rt0 #su #lr #kc. ClientSignUpDone(a, k0)@su & LeakRT(a, rt0)@lr
+         & ServerKeyCompromise('rt')@kc & AdvTokenUse(a, sd, cid, rid, ep, jkt)@i)
+    & not (Ex k c #j. ClientCeremony(a, k, c)@j & jkt = h(pk(k)))
+    & NoAccountCompromise(a)
+    & not (Ex #j. ServerKeyCompromise('at')@j)
+    & not (Ex #j. HostileInScopePage()@j)
+    & NoAdvSignInOrRecovery() & OnlySignUpSessions()
+    & not (Ex x #m. AdvNewAccount(x)@m)
+    & not (Ex x t #j. LeakAT(x, t)@j)
+    & not (Ex x1 c1 p1 h1 r1 j1 #m1. AcceptAssertion(x1, c1, p1, h1, r1, j1)@m1)
+    & not (Ex x c r p g #m. CredReg(x, c, r, p, g, 'adv')@m)
+    & (All x s1 c r e j #m. SessionUse(x, s1, c, r, e, j)@m ==> #m = #i)
+    & QuietAccounts()"
+
+/* A3. Hostile page inside the RP ID scope (violates the deployment
+   requirement of §8 "RP ID scope").  Registration with attestation "none"
+   carries no signature over clientData, so the origin check at registration
+   is not cryptographic: the page makes the user's authenticator create a
+   credential for the RP ID under the attacker's account and registers its
+   public key itself; the user later signs in to the attacker's account at
+   the honest origin. */
+lemma weakness_hostile_subdomain_account_swap: exists-trace
+  "Ex a k #i.
+      ClientLoginDone(a, k)@i & not (Ex #h. HonestAccount(a)@h)
+    & (Ex cid #n #p. AdvNewAccount(a)@n & Planted(a, cid)@p & ClientLoginWith(a, cid)@i)
+    & not (Ex k2 #j. CompromiseDevice(k2)@j)
+    & not (Ex u p #j. CompromisePasskey(u, p)@j)
+    & not (Ex x #j. LeakRecovery(x)@j)
+    & not (Ex x #j. ServerKeyCompromise(x)@j)
+    & not (Ex x k2 #m. ClientSignUpDone(x, k2)@m)
+    & not (Ex x p c j #m. AdvSignIn(x, p, c, j)@m)
+    & not (Ex x t #j. LeakAT(x, t)@j)
+    & not (Ex x t #j. LeakRT(x, t)@j)
+    & not (Ex x c r p g #m. CredReg(x, c, r, p, g, 'h')@m)
+    & not (Ex x s c r e j #m. SessionUse(x, s, c, r, e, j)@m)
+    & not (Ex x c #m. ClientNewPasskey(x, c, 'add')@m)
+    & not (Ex x c #m. ClientNewPasskey(x, c, 'recover')@m)
+    & not (Ex x c j #m. AdvCeremony(x, c, j)@m & not (x = a))
+    & QuietAccounts()"
+
+/* A4. Why resource_access_authentication needs more than "K, a passkey of
+   A, or A's recovery code": with the key of ANOTHER device that holds an
+   active session of A (here the sign-up device), the adversary adds its
+   own passkey through the account API (step-up is satisfied while that
+   session's ceremony is recent) and then signs in with its own DPoP key K.
+   K is not a compromised device key, no passkey of A is compromised and no
+   recovery code leaked, yet the resource server accepts a request for A
+   bound to K. */
+lemma limit_other_device_compromise: exists-trace
+  "Ex a jkt req at #i #h.
+      RSAccept(a, jkt, req, at)@i & HonestAccount(a)@h
+    & not (Ex k c #j. ClientCeremony(a, k, c)@j & jkt = h(pk(k)))
+    & not (Ex k #j. CompromiseDevice(k)@j & jkt = h(pk(k)))
+    & not (Ex u p #j. CompromisePasskey(u, p)@j)
+    & not (Ex x #j. LeakRecovery(x)@j)
+    & not (Ex x #j. ServerKeyCompromise(x)@j)
+    & not (Ex #j. HostileInScopePage()@j)
+    & (Ex k0 #su #cd. ClientSignUpDone(a, k0)@su & CompromiseDevice(k0)@cd)
+    & OnlySignUpSessions()
+    & not (Ex x #m. AdvNewAccount(x)@m)
+    & not (Ex x #m. AdvRecoverOptions(x)@m)
+    & not (Ex x c j #m. AdvCeremony(x, c, j)@m)
+    & not (Ex x k #m. ClientRefreshDone(x, k)@m)
+    & not (Ex x t #j. LeakRT(x, t)@j)
+    & not (Ex x s1 c r e j #m. AcceptRefresh(x, s1, c, r, e, j)@m)
+    & not (Ex p c kk #m. Asserted(p, c, 'rp', <'rp', 'app'>, kk)@m)
+    & (All x1 c1 r1 p1 g1 x2 c2 r2 p2 g2 #m1 #m2.
+         CredReg(x1, c1, r1, p1, g1, 'adv')@m1 & CredReg(x2, c2, r2, p2, g2, 'adv')@m2
+         ==> #m1 = #m2)
+    & (All x1 p1 c1 j1 x2 p2 c2 j2 #m1 #m2.
+         AdvSignIn(x1, p1, c1, j1)@m1 & AdvSignIn(x2, p2, c2, j2)@m2 ==> #m1 = #m2)
+    & not (Ex #m. ClientEvilRSRequest()@m)
+    & AtMostTwoSessionUses()
+    & QuietAccounts()"
+#else
+/* ======================================================================
+ * Default configuration (the honest deployment)
+ * ==================================================================== */
+
+/* What it means for account a to be compromised.  A device key counts only
+   if it is compromised while it can still act for a: while one of its
+   sessions of a is active (neither signed out everywhere / recovered /
+   deleted -- the session's epoch was not replaced -- nor its passkey
+   registration removed), or while one of its passkey ceremonies for a is
+   still unredeemed.  Compromising a device after all of that is harmless.
+   Otherwise: the private key of a passkey registered on a, or a recovery
+   code of a, is known to the adversary. */
+predicates:
+  AccountCompromised(a) <=>
+      (Ex k sd cid rid ep #c #s. CompromiseDevice(k)@c
+         & SessionStart(a, sd, cid, rid, ep, h(pk(k)), 'h')@s
+         & not (Ex #l. EpochChange(a, ep)@l & #l < #c)
+         & not (Ex #r. CredRemoved(rid)@r & #r < #c))
+    | (Ex k ch #c #j. CompromiseDevice(k)@c & ClientCeremony(a, k, ch)@j
+         & not (Ex j2 #u. ChalUsed(ch, j2)@u & #u < #c))
+    | (Ex u p cid rec g t #i #j. CompromisePasskey(u, p)@i
+                                & CredReg(a, cid, rec, p, g, t)@j)
+    | (Ex #i. LeakRecovery(a)@i)
+
+/* ----------------------------------------------------------------------
+ * Helper lemmas
+ * -------------------------------------------------------------------- */
+
+/* The auth service's signing keys never leak (KMS assumption). */
+lemma as_keys_secret [use_induction, reuse, hide_lemma=passkey_secret]:
+  "All skat skrt #i. ASKeysGen(skat, skrt)@i
+      ==> not (Ex #j. K(skat)@j) & not (Ex #j. K(skrt)@j)"
+
+/* A device's DPoP private key is only known to the adversary after an
+   explicit device compromise (non-extractable key). */
+lemma device_key_secret [use_induction, reuse, hide_lemma=passkey_secret,
+                         hide_lemma=as_keys_secret]:
+  "All k #i #j. NewDevice(k)@i & K(k)@j
+      ==> Ex #c. CompromiseDevice(k)@c & #c < #j"
+
+/* Honest clients perform ceremonies with their own (fresh) device keys. */
+lemma ceremony_device [reuse, hide_lemma=passkey_secret,
+                       hide_lemma=as_keys_secret,
+                       hide_lemma=device_key_secret]:
+  "All a k c #j. ClientCeremony(a, k, c)@j ==> Ex #d. NewDevice(k)@d & #d < #j"
+
+/* Challenges are single-use: at most one verify request consumes each. */
+lemma chal_single_use [reuse, heuristic={chal}, hide_lemma=passkey_secret,
+                       hide_lemma=as_keys_secret,
+                       hide_lemma=device_key_secret,
+                       hide_lemma=ceremony_device]:
+  "All c j1 j2 #u #v. ChalUsed(c, j1)@u & ChalUsed(c, j2)@v ==> #u = #v"
+
+/* Every accepted verify request (sign-up, sign-in, recovery, add passkey)
+   is proven by the key that requested the challenge. */
+lemma chal_bound [reuse, heuristic={no_account}, hide_lemma=passkey_secret,
+                  hide_lemma=as_keys_secret, hide_lemma=device_key_secret,
+                  hide_lemma=ceremony_device, hide_lemma=chal_single_use]:
+  "All c jkt #u. ChalUsed(c, jkt)@u ==> Ex #o. ChalIssued(c, jkt)@o & #o < #u"
+
+/* Every session use (refresh or account API) presents a token of a session
+   that started earlier with the same account, sid, cid, rid, epoch and
+   cnf.jkt: tokens cannot be forged, and refresh copies these claims. */
+lemma token_origin [use_induction, reuse, heuristic={no_state},
+                    hide_lemma=passkey_secret, hide_lemma=device_key_secret,
+                    hide_lemma=ceremony_device, hide_lemma=chal_single_use,
+                    hide_lemma=chal_bound]:
+  "All a sd cid rid ep jkt #i. SessionUse(a, sd, cid, rid, ep, jkt)@i
+      ==> Ex t #j. SessionStart(a, sd, cid, rid, ep, jkt, t)@j & #j < #i"
+
+/* The same for access tokens accepted by the resource server. */
+lemma at_origin [reuse, heuristic={no_state}, hide_lemma=passkey_secret,
+                 hide_lemma=device_key_secret, hide_lemma=ceremony_device,
+                 hide_lemma=chal_single_use, hide_lemma=chal_bound]:
+  "All a sd cid rid ep jkt #i. RSSession(a, sd, cid, rid, ep, jkt)@i
+      ==> Ex t #j. SessionStart(a, sd, cid, rid, ep, jkt, t)@j & #j < #i"
+
+/* A session started on an honest client's connection was started by that
+   client's passkey ceremony, with the client's DPoP key. */
+lemma session_origin [reuse, heuristic={no_account},
+                      hide_lemma=passkey_secret, hide_lemma=as_keys_secret,
+                      hide_lemma=device_key_secret,
+                      hide_lemma=ceremony_device, hide_lemma=chal_single_use,
+                      hide_lemma=chal_bound, hide_lemma=token_origin,
+                      hide_lemma=at_origin]:
+  "All a sd cid rid ep jkt #s. SessionStart(a, sd, cid, rid, ep, jkt, 'h')@s
+      ==> Ex k c #j. ClientCeremony(a, k, c)@j & jkt = h(pk(k)) & #j < #s"
+
+/* Account state is one linear fact per account (Tamarin detects it as an
+   injective fact).  The session epoch and the credential generation are
+   fresh values: each increment of the counter in docs/protocol.md is
+   modelled as a value that never occurred before, which is all the
+   protocol relies on (they are only ever compared for equality). */
+
+/* Once the epoch has moved on (sign-out everywhere, recovery, deletion),
+   an epoch created before that point is never current again. */
+lemma epoch_no_return [use_induction, reuse, heuristic={state_chain},
+                       hide_lemma=passkey_secret, hide_lemma=as_keys_secret,
+                       hide_lemma=device_key_secret,
+                       hide_lemma=ceremony_device,
+                       hide_lemma=chal_single_use, hide_lemma=chal_bound,
+                       hide_lemma=token_origin, hide_lemma=at_origin,
+                       hide_lemma=session_origin]:
+  "All a e e2 #c #l #r.
+      EpochCreated(a, e)@c & EpochChange(a, e2)@l & EpochRead(a, e)@r
+    & #c < #l & #l < #r ==> F"
+
+/* Once a recovery replaced the credential generation, a generation created
+   before it is never current again. */
+lemma gen_no_return [use_induction, reuse, heuristic={state_chain},
+                     hide_lemma=passkey_secret, hide_lemma=as_keys_secret,
+                     hide_lemma=device_key_secret,
+                     hide_lemma=ceremony_device, hide_lemma=chal_single_use,
+                     hide_lemma=chal_bound, hide_lemma=token_origin,
+                     hide_lemma=at_origin, hide_lemma=session_origin,
+                     hide_lemma=epoch_no_return]:
+  "All a g g2 #c #l #r.
+      GenCreated(a, g)@c & GenChange(a, g2)@l & GenRead(a, g)@r
+    & #c < #l & #l < #r ==> F"
+
+lemma epoch_origin [use_induction, reuse, hide_lemma=passkey_secret,
+                    hide_lemma=as_keys_secret, hide_lemma=device_key_secret,
+                    hide_lemma=ceremony_device, hide_lemma=chal_single_use,
+                    hide_lemma=chal_bound, hide_lemma=token_origin,
+                    hide_lemma=at_origin, hide_lemma=session_origin,
+                    hide_lemma=epoch_no_return, hide_lemma=gen_no_return]:
+  "All a e #r. EpochRead(a, e)@r ==> Ex #c. EpochCreated(a, e)@c & #c < #r"
+
+lemma gen_origin [use_induction, reuse, hide_lemma=passkey_secret,
+                  hide_lemma=as_keys_secret, hide_lemma=device_key_secret,
+                  hide_lemma=ceremony_device, hide_lemma=chal_single_use,
+                  hide_lemma=chal_bound, hide_lemma=token_origin,
+                  hide_lemma=at_origin, hide_lemma=session_origin,
+                  hide_lemma=epoch_no_return, hide_lemma=gen_no_return,
+                  hide_lemma=epoch_origin]:
+  "All a g #r. GenRead(a, g)@r ==> Ex #c. GenCreated(a, g)@c & #c < #r"
+
+/* A replaced epoch was created before it was replaced. */
+lemma epoch_change_origin [reuse, heuristic={no_state},
+                           hide_lemma=passkey_secret,
+                           hide_lemma=as_keys_secret,
+                           hide_lemma=device_key_secret,
+                           hide_lemma=ceremony_device,
+                           hide_lemma=chal_single_use, hide_lemma=chal_bound,
+                           hide_lemma=token_origin, hide_lemma=at_origin,
+                           hide_lemma=session_origin,
+                           hide_lemma=epoch_no_return,
+                           hide_lemma=gen_no_return, hide_lemma=gen_origin]:
+  "All a e #l. EpochChange(a, e)@l ==> Ex #c. EpochCreated(a, e)@c & #c < #l"
+
+/* In particular, an epoch that was replaced is never read again. */
+lemma epoch_changed_gone [reuse, heuristic={state_chain},
+                          hide_lemma=passkey_secret,
+                          hide_lemma=as_keys_secret,
+                          hide_lemma=device_key_secret,
+                          hide_lemma=ceremony_device,
+                          hide_lemma=chal_single_use, hide_lemma=chal_bound,
+                          hide_lemma=token_origin, hide_lemma=at_origin,
+                          hide_lemma=session_origin,
+                          hide_lemma=gen_no_return, hide_lemma=epoch_origin,
+                          hide_lemma=gen_origin]:
+  "All a e #l #r. EpochChange(a, e)@l & EpochRead(a, e)@r & #l < #r ==> F"
+
+/* Central invariant, in steps.  AdvAct(a) marks every request the auth
+   service processes for account a on an adversary connection.  Each step
+   lemma shows what the adversary needed for one kind of request: a root
+   compromise of a, or an earlier adversary request for a. */
+
+/* Accounts are created fresh for whoever asked: an honest client's account
+   is never created on an adversary connection. */
+lemma adv_step_new_account [reuse, heuristic={no_state},
+                            hide_lemma=passkey_secret,
+                            hide_lemma=as_keys_secret,
+                            hide_lemma=device_key_secret,
+                            hide_lemma=ceremony_device,
+                            hide_lemma=chal_single_use,
+                            hide_lemma=chal_bound, hide_lemma=token_origin,
+                            hide_lemma=at_origin, hide_lemma=session_origin,
+                            hide_lemma=epoch_no_return,
+                            hide_lemma=gen_no_return,
+                            hide_lemma=epoch_origin, hide_lemma=gen_origin,
+                            hide_lemma=epoch_change_origin,
+                            hide_lemma=epoch_changed_gone]:
+  "All a #h #i. HonestAccount(a)@h & AdvNewAccount(a)@i ==> F"
+
+/* Refresh or account-API request: needs, before the request, the DPoP key
+   of the (honest) session the token belongs to. */
+lemma adv_step_token_use [reuse, heuristic={tokens},
+                          hide_lemma=passkey_secret,
+                          hide_lemma=chal_single_use, hide_lemma=chal_bound,
+                          hide_lemma=at_origin, hide_lemma=epoch_no_return,
+                          hide_lemma=gen_no_return, hide_lemma=epoch_origin,
+                          hide_lemma=gen_origin,
+                          hide_lemma=epoch_change_origin,
+                          hide_lemma=epoch_changed_gone,
+                          hide_lemma=adv_step_new_account]:
+  "All a sd cid rid ep jkt #h #i.
+      HonestAccount(a)@h & AdvTokenUse(a, sd, cid, rid, ep, jkt)@i
+      ==> (Ex k #c #s. CompromiseDevice(k)@c & #c < #i
+                       & SessionStart(a, sd, cid, rid, ep, jkt, 'h')@s
+                       & jkt = h(pk(k)))
+        | (Ex #j. AdvAct(a)@j & #j < #i)"
+
+/* Sign-in: needs the private key of a credential registered on a, or the
+   key of the device that requested the challenge (a WebAuthn response of an
+   honest ceremony is public, but it can only be redeemed with that key). */
+lemma adv_step_sign_in [reuse, heuristic={signin},
+                        hide_lemma=chal_single_use, hide_lemma=chal_bound,
+                        hide_lemma=token_origin, hide_lemma=at_origin,
+                        hide_lemma=session_origin,
+                        hide_lemma=epoch_no_return, hide_lemma=gen_no_return,
+                        hide_lemma=epoch_origin, hide_lemma=gen_origin,
+                        hide_lemma=epoch_change_origin,
+                        hide_lemma=epoch_changed_gone,
+                        hide_lemma=adv_step_new_account,
+                        hide_lemma=adv_step_token_use]:
+  "All a pkc c jkt #h #i. HonestAccount(a)@h & AdvSignIn(a, pkc, c, jkt)@i
+      ==> (Ex u cid rec g t #x #r. CompromisePasskey(u, pkc)@x
+                                  & CredReg(a, cid, rec, pkc, g, t)@r)
+        | (Ex k #x #j. CompromiseDevice(k)@x & #x < #i
+                       & ClientCeremony(a, k, c)@j & jkt = h(pk(k)))
+        | (Ex #j. AdvAct(a)@j & #j < #i)"
+
+/* Sign-up or recovery verify: needs the key of the device that requested
+   the challenge, or a challenge the adversary requested itself. */
+lemma adv_step_ceremony [reuse, heuristic={ceremony},
+                         hide_lemma=passkey_secret,
+                         hide_lemma=chal_single_use, hide_lemma=chal_bound,
+                         hide_lemma=token_origin, hide_lemma=at_origin,
+                         hide_lemma=session_origin,
+                         hide_lemma=epoch_no_return,
+                         hide_lemma=gen_no_return, hide_lemma=epoch_origin,
+                         hide_lemma=gen_origin,
+                         hide_lemma=epoch_change_origin,
+                         hide_lemma=epoch_changed_gone,
+                         hide_lemma=adv_step_new_account,
+                         hide_lemma=adv_step_token_use,
+                         hide_lemma=adv_step_sign_in]:
+  "All a c jkt #h #i. HonestAccount(a)@h & AdvCeremony(a, c, jkt)@i
+      ==> (Ex k #x #j. CompromiseDevice(k)@x & #x < #i
+                       & ClientCeremony(a, k, c)@j & jkt = h(pk(k)))
+        | (Ex #j. AdvAct(a)@j & #j < #i)"
+
+/* Recovery options: needs a recovery code of a. */
+lemma adv_step_recover_options [reuse, heuristic={no_account},
+                                hide_lemma=passkey_secret,
+                                hide_lemma=device_key_secret,
+                                hide_lemma=ceremony_device,
+                                hide_lemma=chal_single_use,
+                                hide_lemma=chal_bound,
+                                hide_lemma=token_origin,
+                                hide_lemma=at_origin,
+                                hide_lemma=session_origin,
+                                hide_lemma=epoch_no_return,
+                                hide_lemma=gen_no_return,
+                                hide_lemma=epoch_origin,
+                                hide_lemma=gen_origin,
+                                hide_lemma=epoch_change_origin,
+                                hide_lemma=epoch_changed_gone,
+                                hide_lemma=adv_step_new_account,
+                                hide_lemma=adv_step_token_use,
+                                hide_lemma=adv_step_sign_in,
+                                hide_lemma=adv_step_ceremony]:
+  "All a #h #i. HonestAccount(a)@h & AdvRecoverOptions(a)@i
+      ==> (Ex #c. LeakRecovery(a)@c)
+        | (Ex #j. AdvAct(a)@j & #j < #i)"
+
+lemma adversary_needs_compromise [use_induction, reuse, heuristic={combine},
+                                  hide_lemma=passkey_secret,
+                                  hide_lemma=as_keys_secret,
+                                  hide_lemma=device_key_secret,
+                                  hide_lemma=ceremony_device,
+                                  hide_lemma=chal_bound,
+                                  hide_lemma=token_origin,
+                                  hide_lemma=at_origin,
+                                  hide_lemma=session_origin,
+                                  hide_lemma=epoch_no_return,
+                                  hide_lemma=gen_no_return,
+                                  hide_lemma=epoch_origin,
+                                  hide_lemma=gen_origin,
+                                  hide_lemma=epoch_change_origin]:
+  "All a #h #i. HonestAccount(a)@h & AdvAct(a)@i ==> AccountCompromised(a)"
+
+/* Every session of an honest account was started by an honest device's
+   passkey ceremony with that device's key, unless the account is
+   compromised. */
+lemma session_origin_honest [reuse, heuristic={no_state},
+                             hide_lemma=passkey_secret,
+                             hide_lemma=as_keys_secret,
+                             hide_lemma=device_key_secret,
+                             hide_lemma=ceremony_device,
+                             hide_lemma=chal_single_use,
+                             hide_lemma=chal_bound, hide_lemma=token_origin,
+                             hide_lemma=at_origin,
+                             hide_lemma=epoch_no_return,
+                             hide_lemma=gen_no_return,
+                             hide_lemma=epoch_origin, hide_lemma=gen_origin,
+                             hide_lemma=epoch_change_origin,
+                             hide_lemma=epoch_changed_gone,
+                             hide_lemma=adv_step_new_account,
+                             hide_lemma=adv_step_token_use,
+                             hide_lemma=adv_step_sign_in,
+                             hide_lemma=adv_step_ceremony,
+                             hide_lemma=adv_step_recover_options]:
+  "All a sd cid rid ep jkt t #i #h.
+      SessionStart(a, sd, cid, rid, ep, jkt, t)@i & HonestAccount(a)@h
+      ==> (Ex k c #j. ClientCeremony(a, k, c)@j & jkt = h(pk(k)) & #j < #i)
+        | AccountCompromised(a)"
+
+/* ======================================================================
+ * 1. Executability: every flow can complete between honest parties, with
+ *    no compromise and no adversary-initiated request.
+ * ==================================================================== */
+
+predicates:
+  NoCompromise() <=>
+      not (Ex k #i. CompromiseDevice(k)@i)
+    & not (Ex u p #i. CompromisePasskey(u, p)@i)
+    & not (Ex x #i. LeakRecovery(x)@i)
+    & not (Ex x t #i. LeakAT(x, t)@i)
+    & not (Ex x t #i. LeakRT(x, t)@i)
+    & not (Ex x #i. AdvAct(x)@i)
+
+/* Each lemma pins down the shortest honest run for its flow (the extra
+   constraints only rule out longer alternatives, they never make a flow
+   reachable that would not be otherwise). */
+predicates:
+  OnlySignUpPasskeys() <=>
+      not (Ex a c #m. ClientNewPasskey(a, c, 'add')@m)
+    & not (Ex a c #m. ClientNewPasskey(a, c, 'recover')@m),
+  NoOtherSessions() <=>
+      not (Ex a k #m. ClientLoginDone(a, k)@m)
+    & not (Ex a k #m. ClientRefreshDone(a, k)@m)
+    & not (Ex a k #m. ClientRecoveryDone(a, k)@m),
+  AtMostTwoSessionUses() <=>
+      All a1 s1 c1 r1 e1 j1 a2 s2 c2 r2 e2 j2 a3 s3 c3 r3 e3 j3 #m1 #m2 #m3.
+        SessionUse(a1, s1, c1, r1, e1, j1)@m1 & SessionUse(a2, s2, c2, r2, e2, j2)@m2
+      & SessionUse(a3, s3, c3, r3, e3, j3)@m3
+        ==> #m1 = #m2 | #m1 = #m3 | #m2 = #m3
+
+lemma exec_sign_up [hide_lemma=passkey_secret, hide_lemma=as_keys_secret,
+                    hide_lemma=device_key_secret, hide_lemma=ceremony_device,
+                    hide_lemma=chal_single_use, hide_lemma=chal_bound,
+                    hide_lemma=token_origin, hide_lemma=at_origin,
+                    hide_lemma=session_origin, hide_lemma=epoch_no_return,
+                    hide_lemma=gen_no_return, hide_lemma=epoch_origin,
+                    hide_lemma=gen_origin, hide_lemma=epoch_change_origin,
+                    hide_lemma=epoch_changed_gone,
+                    hide_lemma=adv_step_new_account,
+                    hide_lemma=adv_step_token_use,
+                    hide_lemma=adv_step_sign_in,
+                    hide_lemma=adv_step_ceremony,
+                    hide_lemma=adv_step_recover_options,
+                    hide_lemma=adversary_needs_compromise,
+                    hide_lemma=session_origin_honest]: exists-trace
+  "Ex a k #i. ClientSignUpDone(a, k)@i & NoCompromise()"
+
+lemma exec_sign_in [hide_lemma=passkey_secret, hide_lemma=as_keys_secret,
+                    hide_lemma=device_key_secret, hide_lemma=ceremony_device,
+                    hide_lemma=chal_single_use, hide_lemma=chal_bound,
+                    hide_lemma=token_origin, hide_lemma=at_origin,
+                    hide_lemma=session_origin, hide_lemma=epoch_no_return,
+                    hide_lemma=gen_no_return, hide_lemma=epoch_origin,
+                    hide_lemma=gen_origin, hide_lemma=epoch_change_origin,
+                    hide_lemma=epoch_changed_gone,
+                    hide_lemma=adv_step_new_account,
+                    hide_lemma=adv_step_token_use,
+                    hide_lemma=adv_step_sign_in,
+                    hide_lemma=adv_step_ceremony,
+                    hide_lemma=adv_step_recover_options,
+                    hide_lemma=adversary_needs_compromise,
+                    hide_lemma=session_origin_honest]: exists-trace
+  "Ex a k #i. ClientLoginDone(a, k)@i & NoCompromise() & OnlySignUpPasskeys()"
+
+lemma exec_refresh [hide_lemma=passkey_secret, hide_lemma=as_keys_secret,
+                    hide_lemma=device_key_secret, hide_lemma=ceremony_device,
+                    hide_lemma=chal_single_use, hide_lemma=chal_bound,
+                    hide_lemma=token_origin, hide_lemma=at_origin,
+                    hide_lemma=session_origin, hide_lemma=epoch_no_return,
+                    hide_lemma=gen_no_return, hide_lemma=epoch_origin,
+                    hide_lemma=gen_origin, hide_lemma=epoch_change_origin,
+                    hide_lemma=epoch_changed_gone,
+                    hide_lemma=adv_step_new_account,
+                    hide_lemma=adv_step_token_use,
+                    hide_lemma=adv_step_sign_in,
+                    hide_lemma=adv_step_ceremony,
+                    hide_lemma=adv_step_recover_options,
+                    hide_lemma=adversary_needs_compromise,
+                    hide_lemma=session_origin_honest]: exists-trace
+  "Ex a k #i. ClientRefreshDone(a, k)@i & NoCompromise() & OnlySignUpPasskeys()
+    & not (Ex b l #m. ClientLoginDone(b, l)@m)
+    & not (Ex b l #m. ClientRecoveryDone(b, l)@m)
+    & (All b l #m. ClientRefreshDone(b, l)@m ==> #m = #i)"
+
+lemma exec_resource_access [hide_lemma=passkey_secret,
+                            hide_lemma=as_keys_secret,
+                            hide_lemma=device_key_secret,
+                            hide_lemma=ceremony_device,
+                            hide_lemma=chal_single_use,
+                            hide_lemma=chal_bound, hide_lemma=token_origin,
+                            hide_lemma=at_origin, hide_lemma=session_origin,
+                            hide_lemma=epoch_no_return,
+                            hide_lemma=gen_no_return,
+                            hide_lemma=epoch_origin, hide_lemma=gen_origin,
+                            hide_lemma=epoch_change_origin,
+                            hide_lemma=epoch_changed_gone,
+                            hide_lemma=adv_step_new_account,
+                            hide_lemma=adv_step_token_use,
+                            hide_lemma=adv_step_sign_in,
+                            hide_lemma=adv_step_ceremony,
+                            hide_lemma=adv_step_recover_options,
+                            hide_lemma=adversary_needs_compromise,
+                            hide_lemma=session_origin_honest]: exists-trace
+  "Ex a jkt req at #i. RSAccept(a, jkt, req, at)@i & NoCompromise()
+    & OnlySignUpPasskeys() & NoOtherSessions()"
+
+lemma exec_sign_out_everywhere [hide_lemma=passkey_secret,
+                                hide_lemma=as_keys_secret,
+                                hide_lemma=device_key_secret,
+                                hide_lemma=ceremony_device,
+                                hide_lemma=chal_single_use,
+                                hide_lemma=chal_bound,
+                                hide_lemma=token_origin,
+                                hide_lemma=at_origin,
+                                hide_lemma=session_origin,
+                                hide_lemma=epoch_no_return,
+                                hide_lemma=gen_no_return,
+                                hide_lemma=epoch_origin,
+                                hide_lemma=gen_origin,
+                                hide_lemma=epoch_change_origin,
+                                hide_lemma=epoch_changed_gone,
+                                hide_lemma=adv_step_new_account,
+                                hide_lemma=adv_step_token_use,
+                                hide_lemma=adv_step_sign_in,
+                                hide_lemma=adv_step_ceremony,
+                                hide_lemma=adv_step_recover_options,
+                                hide_lemma=adversary_needs_compromise,
+                                hide_lemma=session_origin_honest]: exists-trace
+  "Ex a #i. ClientLogoutAllDone(a)@i & NoCompromise()
+    & OnlySignUpPasskeys() & NoOtherSessions()"
+
+lemma exec_passkey_add [hide_lemma=passkey_secret, hide_lemma=as_keys_secret,
+                        hide_lemma=device_key_secret,
+                        hide_lemma=ceremony_device,
+                        hide_lemma=chal_single_use, hide_lemma=chal_bound,
+                        hide_lemma=token_origin, hide_lemma=at_origin,
+                        hide_lemma=session_origin,
+                        hide_lemma=epoch_no_return, hide_lemma=gen_no_return,
+                        hide_lemma=epoch_origin, hide_lemma=gen_origin,
+                        hide_lemma=epoch_change_origin,
+                        hide_lemma=epoch_changed_gone,
+                        hide_lemma=adv_step_new_account,
+                        hide_lemma=adv_step_token_use,
+                        hide_lemma=adv_step_sign_in,
+                        hide_lemma=adv_step_ceremony,
+                        hide_lemma=adv_step_recover_options,
+                        hide_lemma=adversary_needs_compromise,
+                        hide_lemma=session_origin_honest]: exists-trace
+  "Ex a cid #i. ClientPasskeyAdded(a, cid)@i & NoCompromise() & NoOtherSessions()
+    & not (Ex b c #m. ClientNewPasskey(b, c, 'recover')@m)
+    & not (Ex x c p h r j #m. AcceptAssertion(x, c, p, h, r, j)@m)
+    & AtMostTwoSessionUses()"
+
+lemma exec_passkey_removal [hide_lemma=passkey_secret,
+                            hide_lemma=as_keys_secret,
+                            hide_lemma=device_key_secret,
+                            hide_lemma=ceremony_device,
+                            hide_lemma=chal_single_use,
+                            hide_lemma=chal_bound, hide_lemma=token_origin,
+                            hide_lemma=at_origin, hide_lemma=session_origin,
+                            hide_lemma=epoch_no_return,
+                            hide_lemma=gen_no_return,
+                            hide_lemma=epoch_origin, hide_lemma=gen_origin,
+                            hide_lemma=epoch_change_origin,
+                            hide_lemma=epoch_changed_gone,
+                            hide_lemma=adv_step_new_account,
+                            hide_lemma=adv_step_token_use,
+                            hide_lemma=adv_step_sign_in,
+                            hide_lemma=adv_step_ceremony,
+                            hide_lemma=adv_step_recover_options,
+                            hide_lemma=adversary_needs_compromise,
+                            hide_lemma=session_origin_honest]: exists-trace
+  "Ex a cid #i. ClientPasskeyRemoved(a, cid)@i & NoCompromise()
+    & OnlySignUpPasskeys() & NoOtherSessions()"
+
+lemma exec_recovery [hide_lemma=passkey_secret, hide_lemma=as_keys_secret,
+                     hide_lemma=device_key_secret,
+                     hide_lemma=ceremony_device, hide_lemma=chal_single_use,
+                     hide_lemma=chal_bound, hide_lemma=token_origin,
+                     hide_lemma=at_origin, hide_lemma=session_origin,
+                     hide_lemma=epoch_no_return, hide_lemma=gen_no_return,
+                     hide_lemma=epoch_origin, hide_lemma=gen_origin,
+                     hide_lemma=epoch_change_origin,
+                     hide_lemma=epoch_changed_gone,
+                     hide_lemma=adv_step_new_account,
+                     hide_lemma=adv_step_token_use,
+                     hide_lemma=adv_step_sign_in,
+                     hide_lemma=adv_step_ceremony,
+                     hide_lemma=adv_step_recover_options,
+                     hide_lemma=adversary_needs_compromise,
+                     hide_lemma=session_origin_honest]: exists-trace
+  "Ex a k #i. ClientRecoveryDone(a, k)@i & NoCompromise()
+    & not (Ex b c #m. ClientNewPasskey(b, c, 'add')@m)
+    & not (Ex b l #m. ClientLoginDone(b, l)@m)
+    & not (Ex b l #m. ClientRefreshDone(b, l)@m)
+    & not (Ex b #m. ClientRecoveryCodeRotated(b)@m)
+    & (All b l #m. ClientRecoveryDone(b, l)@m ==> #m = #i)"
+
+lemma exec_recovery_code_rotation [hide_lemma=passkey_secret,
+                                   hide_lemma=as_keys_secret,
+                                   hide_lemma=device_key_secret,
+                                   hide_lemma=ceremony_device,
+                                   hide_lemma=chal_single_use,
+                                   hide_lemma=chal_bound,
+                                   hide_lemma=token_origin,
+                                   hide_lemma=at_origin,
+                                   hide_lemma=session_origin,
+                                   hide_lemma=epoch_no_return,
+                                   hide_lemma=gen_no_return,
+                                   hide_lemma=epoch_origin,
+                                   hide_lemma=gen_origin,
+                                   hide_lemma=epoch_change_origin,
+                                   hide_lemma=epoch_changed_gone,
+                                   hide_lemma=adv_step_new_account,
+                                   hide_lemma=adv_step_token_use,
+                                   hide_lemma=adv_step_sign_in,
+                                   hide_lemma=adv_step_ceremony,
+                                   hide_lemma=adv_step_recover_options,
+                                   hide_lemma=adversary_needs_compromise,
+                                   hide_lemma=session_origin_honest]: exists-trace
+  "Ex a #i. ClientRecoveryCodeRotated(a)@i & NoCompromise()
+    & OnlySignUpPasskeys() & NoOtherSessions()"
+
+lemma exec_account_deletion [hide_lemma=passkey_secret,
+                             hide_lemma=as_keys_secret,
+                             hide_lemma=device_key_secret,
+                             hide_lemma=ceremony_device,
+                             hide_lemma=chal_single_use,
+                             hide_lemma=chal_bound, hide_lemma=token_origin,
+                             hide_lemma=at_origin, hide_lemma=session_origin,
+                             hide_lemma=epoch_no_return,
+                             hide_lemma=gen_no_return,
+                             hide_lemma=epoch_origin, hide_lemma=gen_origin,
+                             hide_lemma=epoch_change_origin,
+                             hide_lemma=epoch_changed_gone,
+                             hide_lemma=adv_step_new_account,
+                             hide_lemma=adv_step_token_use,
+                             hide_lemma=adv_step_sign_in,
+                             hide_lemma=adv_step_ceremony,
+                             hide_lemma=adv_step_recover_options,
+                             hide_lemma=adversary_needs_compromise,
+                             hide_lemma=session_origin_honest]: exists-trace
+  "Ex a #i. ClientAccountDeleted(a)@i & NoCompromise()
+    & OnlySignUpPasskeys() & NoOtherSessions()"
+
+/* Re-registering a removed credential ID is possible (so passkey_removal_
+   revokes is not vacuous about it): after registration rid of credential ID
+   cid is removed, the same cid is registered again on the same account with
+   a new registration ID rid2 and a session is started with it.  Honest
+   authenticators never reuse a credential ID, so the re-registration is
+   done by the adversary (here with a leaked recovery code, after the user
+   removed the passkey). */
+lemma exec_reregistration [hide_lemma=passkey_secret,
+                           hide_lemma=as_keys_secret,
+                           hide_lemma=device_key_secret,
+                           hide_lemma=ceremony_device,
+                           hide_lemma=chal_single_use, hide_lemma=chal_bound,
+                           hide_lemma=token_origin, hide_lemma=at_origin,
+                           hide_lemma=session_origin,
+                           hide_lemma=epoch_no_return,
+                           hide_lemma=gen_no_return, hide_lemma=epoch_origin,
+                           hide_lemma=gen_origin,
+                           hide_lemma=epoch_change_origin,
+                           hide_lemma=epoch_changed_gone,
+                           hide_lemma=adv_step_new_account,
+                           hide_lemma=adv_step_token_use,
+                           hide_lemma=adv_step_sign_in,
+                           hide_lemma=adv_step_ceremony,
+                           hide_lemma=adv_step_recover_options,
+                           hide_lemma=adversary_needs_compromise,
+                           hide_lemma=session_origin_honest]: exists-trace
+  "Ex a cid rid rid2 s2 ep2 jkt2 k0 #i #x #su #cr #lr.
+      PasskeyRemoved(a, cid, rid)@i
+    & SessionStart(a, s2, cid, rid2, ep2, jkt2, 'adv')@x & #i < #x
+    & ClientSignUpDone(a, k0)@su & ClientPasskeyRemoved(a, cid)@cr
+    & LeakRecovery(a)@lr
+    & not (Ex k #m. CompromiseDevice(k)@m)
+    & not (Ex u p #m. CompromisePasskey(u, p)@m)
+    & not (Ex x t #m. LeakAT(x, t)@m)
+    & not (Ex x t #m. LeakRT(x, t)@m)
+    & OnlySignUpPasskeys() & NoOtherSessions()
+    & not (Ex x c p h r j #m. AcceptAssertion(x, c, p, h, r, j)@m)
+    & not (Ex x #m. RecoveryCodeRotated(x)@m)
+    & not (Ex x e #m. LogoutAll(x, e)@m)
+    & not (Ex x #m. AccountDeleted(x)@m)
+    & (All x s c r e j #m. SessionUse(x, s, c, r, e, j)@m ==> #m = #i)
+    & (All x g e #m. Recovered(x, g, e)@m ==> #m = #x)"
+
+/* ======================================================================
+ * 2. Resource-access authentication
+ * ==================================================================== */
+
+/* If the resource server accepts a request for an honest account a bound
+   to key thumbprint jkt, then an honest device holding the matching key
+   performed a passkey ceremony (sign-up, sign-in or recovery) for a --
+   unless a is compromised (AccountCompromised above: a device key while it
+   can still act for a, a passkey of a, or a recovery code of a). */
+lemma resource_access_authentication [reuse, heuristic={no_state},
+                                      hide_lemma=passkey_secret,
+                                      hide_lemma=device_key_secret,
+                                      hide_lemma=ceremony_device,
+                                      hide_lemma=chal_single_use,
+                                      hide_lemma=chal_bound,
+                                      hide_lemma=session_origin,
+                                      hide_lemma=epoch_no_return,
+                                      hide_lemma=gen_no_return,
+                                      hide_lemma=epoch_origin,
+                                      hide_lemma=gen_origin,
+                                      hide_lemma=epoch_change_origin,
+                                      hide_lemma=epoch_changed_gone,
+                                      hide_lemma=adv_step_new_account,
+                                      hide_lemma=adv_step_token_use,
+                                      hide_lemma=adv_step_sign_in,
+                                      hide_lemma=adv_step_ceremony,
+                                      hide_lemma=adv_step_recover_options,
+                                      hide_lemma=adversary_needs_compromise]:
+  "All a jkt req at #i #h.
+      RSAccept(a, jkt, req, at)@i & HonestAccount(a)@h
+      ==> (Ex k c #j. ClientCeremony(a, k, c)@j & jkt = h(pk(k)) & #j < #i)
+        | AccountCompromised(a)"
+
+/* The intended statement for a token bound to an honest device key K:
+   a request accepted for account a with K was enabled by K's own passkey
+   ceremony for a, unless K itself is compromised (no other exclusion). */
+lemma resource_access_device_binding [heuristic={ceremony},
+                                      hide_lemma=passkey_secret,
+                                      hide_lemma=chal_single_use,
+                                      hide_lemma=chal_bound,
+                                      hide_lemma=epoch_no_return,
+                                      hide_lemma=gen_no_return,
+                                      hide_lemma=epoch_origin,
+                                      hide_lemma=gen_origin,
+                                      hide_lemma=epoch_change_origin,
+                                      hide_lemma=epoch_changed_gone,
+                                      hide_lemma=adv_step_new_account,
+                                      hide_lemma=adv_step_token_use,
+                                      hide_lemma=adv_step_sign_in,
+                                      hide_lemma=adv_step_ceremony,
+                                      hide_lemma=adv_step_recover_options,
+                                      hide_lemma=adversary_needs_compromise,
+                                      hide_lemma=session_origin_honest,
+                                      hide_lemma=resource_access_authentication]:
+  "All a k req at #i #d.
+      RSAccept(a, h(pk(k)), req, at)@i & NewDevice(k)@d
+      ==> (Ex c #j. ClientCeremony(a, k, c)@j & #j < #i)
+        | (Ex #c. CompromiseDevice(k)@c)"
+
+/* ======================================================================
+ * 3. Token theft alone is insufficient
+ * ==================================================================== */
+
+/* Every request accepted with a token bound to an honest device key was
+   sent by that device, unless that very key was compromised.  Access and
+   refresh tokens (and DPoP proofs sent to other resource servers) may all
+   have leaked. */
+lemma token_theft_needs_device_key [reuse, heuristic={dpop},
+                                    hide_lemma=passkey_secret,
+                                    hide_lemma=ceremony_device,
+                                    hide_lemma=chal_single_use,
+                                    hide_lemma=chal_bound,
+                                    hide_lemma=token_origin,
+                                    hide_lemma=at_origin,
+                                    hide_lemma=session_origin,
+                                    hide_lemma=epoch_no_return,
+                                    hide_lemma=gen_no_return,
+                                    hide_lemma=epoch_origin,
+                                    hide_lemma=gen_origin,
+                                    hide_lemma=epoch_change_origin,
+                                    hide_lemma=epoch_changed_gone,
+                                    hide_lemma=adv_step_new_account,
+                                    hide_lemma=adv_step_token_use,
+                                    hide_lemma=adv_step_sign_in,
+                                    hide_lemma=adv_step_ceremony,
+                                    hide_lemma=adv_step_recover_options,
+                                    hide_lemma=adversary_needs_compromise,
+                                    hide_lemma=session_origin_honest,
+                                    hide_lemma=resource_access_authentication]:
+  "All a k req at #i #d.
+      RSAccept(a, h(pk(k)), req, at)@i & NewDevice(k)@d
+      ==> (Ex #j. ClientRequest(k, req, at)@j & #j < #i)
+        | (Ex #j. CompromiseDevice(k)@j)"
+
+/* With only token theft (no device key, passkey or recovery-code
+   compromise anywhere), every request accepted for an honest account was
+   sent by an honest device. */
+lemma token_theft_alone_insufficient [hide_lemma=passkey_secret,
+                                      hide_lemma=as_keys_secret,
+                                      hide_lemma=device_key_secret,
+                                      hide_lemma=ceremony_device,
+                                      hide_lemma=chal_single_use,
+                                      hide_lemma=chal_bound,
+                                      hide_lemma=token_origin,
+                                      hide_lemma=at_origin,
+                                      hide_lemma=session_origin,
+                                      hide_lemma=epoch_no_return,
+                                      hide_lemma=gen_no_return,
+                                      hide_lemma=epoch_origin,
+                                      hide_lemma=gen_origin,
+                                      hide_lemma=epoch_change_origin,
+                                      hide_lemma=epoch_changed_gone,
+                                      hide_lemma=adv_step_new_account,
+                                      hide_lemma=adv_step_token_use,
+                                      hide_lemma=adv_step_sign_in,
+                                      hide_lemma=adv_step_ceremony,
+                                      hide_lemma=adv_step_recover_options,
+                                      hide_lemma=adversary_needs_compromise,
+                                      hide_lemma=session_origin_honest]:
+  "All a jkt req at #i #h.
+      RSAccept(a, jkt, req, at)@i & HonestAccount(a)@h
+    & not (Ex k #j. CompromiseDevice(k)@j)
+    & not (Ex u p #j. CompromisePasskey(u, p)@j)
+    & not (Ex x #j. LeakRecovery(x)@j)
+      ==> Ex k #j. ClientRequest(k, req, at)@j & jkt = h(pk(k)) & #j < #i"
+
+/* ======================================================================
+ * 4. Ceremonies are bound to the device key
+ * ==================================================================== */
+
+/* A WebAuthn response produced in an honest client's ceremony (sign-up,
+   sign-in, recovery, add passkey) -- which the adversary always sees here --
+   can only be redeemed with the DPoP key of the device that requested the
+   challenge: whatever is started from it is bound to that key. */
+lemma ceremony_bound_to_device [heuristic={binding},
+                                hide_lemma=passkey_secret,
+                                hide_lemma=as_keys_secret,
+                                hide_lemma=device_key_secret,
+                                hide_lemma=ceremony_device,
+                                hide_lemma=chal_single_use,
+                                hide_lemma=chal_bound,
+                                hide_lemma=token_origin,
+                                hide_lemma=at_origin,
+                                hide_lemma=session_origin,
+                                hide_lemma=epoch_no_return,
+                                hide_lemma=gen_no_return,
+                                hide_lemma=epoch_origin,
+                                hide_lemma=gen_origin,
+                                hide_lemma=epoch_change_origin,
+                                hide_lemma=epoch_changed_gone,
+                                hide_lemma=adv_step_new_account,
+                                hide_lemma=adv_step_token_use,
+                                hide_lemma=adv_step_sign_in,
+                                hide_lemma=adv_step_ceremony,
+                                hide_lemma=adv_step_recover_options,
+                                hide_lemma=adversary_needs_compromise,
+                                hide_lemma=session_origin_honest,
+                                hide_lemma=resource_access_authentication,
+                                hide_lemma=token_theft_needs_device_key]:
+  "All k c jkt #j #u. ClientChal(k, c)@j & ChalUsed(c, jkt)@u ==> jkt = h(pk(k))"
+
+/* ======================================================================
+ * 5. Sign-out everywhere: no session that started before it is ever used
+ *    again -- no refresh and no account-API request -- with no exclusions
+ *    (device keys, passkeys, tokens and codes may all be compromised).
+ * ==================================================================== */
+
+lemma sign_out_everywhere_revokes [heuristic={revocation},
+                                   hide_lemma=passkey_secret,
+                                   hide_lemma=as_keys_secret,
+                                   hide_lemma=device_key_secret,
+                                   hide_lemma=ceremony_device,
+                                   hide_lemma=chal_single_use,
+                                   hide_lemma=chal_bound,
+                                   hide_lemma=at_origin,
+                                   hide_lemma=session_origin,
+                                   hide_lemma=gen_no_return,
+                                   hide_lemma=gen_origin,
+                                   hide_lemma=epoch_change_origin,
+                                   hide_lemma=epoch_changed_gone,
+                                   hide_lemma=adv_step_new_account,
+                                   hide_lemma=adv_step_token_use,
+                                   hide_lemma=adv_step_sign_in,
+                                   hide_lemma=adv_step_ceremony,
+                                   hide_lemma=adv_step_recover_options,
+                                   hide_lemma=adversary_needs_compromise,
+                                   hide_lemma=session_origin_honest,
+                                   hide_lemma=resource_access_authentication,
+                                   hide_lemma=token_theft_needs_device_key]:
+  "All a sd cid rid ep jkt t e1 cid2 rid2 ep2 jkt2 #s #l #r.
+      SessionStart(a, sd, cid, rid, ep, jkt, t)@s & LogoutAll(a, e1)@l & #s < #l
+    & SessionUse(a, sd, cid2, rid2, ep2, jkt2)@r & #l < #r
+      ==> F"
+
+/* ======================================================================
+ * 6. Passkey removal: after passkey registration (cid, rid) is removed, no
+ *    session started with it is used again (refresh or account API) -- even
+ *    if the same credential ID is registered again later (that gets a new
+ *    registration ID) -- with no exclusions.
+ * ==================================================================== */
+
+lemma passkey_removal_revokes [heuristic={revocation},
+                               hide_lemma=passkey_secret,
+                               hide_lemma=as_keys_secret,
+                               hide_lemma=device_key_secret,
+                               hide_lemma=ceremony_device,
+                               hide_lemma=chal_single_use,
+                               hide_lemma=chal_bound, hide_lemma=at_origin,
+                               hide_lemma=session_origin,
+                               hide_lemma=epoch_no_return,
+                               hide_lemma=gen_no_return,
+                               hide_lemma=epoch_origin,
+                               hide_lemma=gen_origin,
+                               hide_lemma=epoch_change_origin,
+                               hide_lemma=epoch_changed_gone,
+                               hide_lemma=adv_step_new_account,
+                               hide_lemma=adv_step_token_use,
+                               hide_lemma=adv_step_sign_in,
+                               hide_lemma=adv_step_ceremony,
+                               hide_lemma=adv_step_recover_options,
+                               hide_lemma=adversary_needs_compromise,
+                               hide_lemma=session_origin_honest,
+                               hide_lemma=resource_access_authentication,
+                               hide_lemma=token_theft_needs_device_key]:
+  "All a cid rid sd ep jkt t cid2 rid2 ep2 jkt2 #s #i #j.
+      SessionStart(a, sd, cid, rid, ep, jkt, t)@s & PasskeyRemoved(a, cid, rid)@i
+    & SessionUse(a, sd, cid2, rid2, ep2, jkt2)@j & #i < #j
+      ==> F"
+
+/* ======================================================================
+ * 7. Recovery
+ * ==================================================================== */
+
+/* After a recovery of a, no session that started before it is used again
+   (refresh or account API), with no exclusions. */
+lemma recovery_revokes_sessions [heuristic={revocation},
+                                 hide_lemma=passkey_secret,
+                                 hide_lemma=as_keys_secret,
+                                 hide_lemma=device_key_secret,
+                                 hide_lemma=ceremony_device,
+                                 hide_lemma=chal_single_use,
+                                 hide_lemma=chal_bound, hide_lemma=at_origin,
+                                 hide_lemma=session_origin,
+                                 hide_lemma=gen_no_return,
+                                 hide_lemma=gen_origin,
+                                 hide_lemma=epoch_change_origin,
+                                 hide_lemma=epoch_changed_gone,
+                                 hide_lemma=adv_step_new_account,
+                                 hide_lemma=adv_step_token_use,
+                                 hide_lemma=adv_step_sign_in,
+                                 hide_lemma=adv_step_ceremony,
+                                 hide_lemma=adv_step_recover_options,
+                                 hide_lemma=adversary_needs_compromise,
+                                 hide_lemma=session_origin_honest,
+                                 hide_lemma=resource_access_authentication,
+                                 hide_lemma=token_theft_needs_device_key]:
+  "All a sd cid rid ep jkt t g0 e0 cid2 rid2 ep2 jkt2 #s #v #r.
+      SessionStart(a, sd, cid, rid, ep, jkt, t)@s & Recovered(a, g0, e0)@v & #s < #v
+    & SessionUse(a, sd, cid2, rid2, ep2, jkt2)@r & #v < #r
+      ==> F"
+
+/* After a recovery of a, no passkey registered before it is ever accepted
+   again -- not for sign-in, and not as the passkey of a session (refresh,
+   account API) or as the target of a removal -- with no exclusions. */
+lemma recovery_revokes_old_passkeys [heuristic={actions_first},
+                                     hide_lemma=passkey_secret,
+                                     hide_lemma=as_keys_secret,
+                                     hide_lemma=device_key_secret,
+                                     hide_lemma=ceremony_device,
+                                     hide_lemma=chal_single_use,
+                                     hide_lemma=chal_bound,
+                                     hide_lemma=token_origin,
+                                     hide_lemma=at_origin,
+                                     hide_lemma=session_origin,
+                                     hide_lemma=epoch_no_return,
+                                     hide_lemma=epoch_origin,
+                                     hide_lemma=epoch_change_origin,
+                                     hide_lemma=epoch_changed_gone,
+                                     hide_lemma=adv_step_new_account,
+                                     hide_lemma=adv_step_token_use,
+                                     hide_lemma=adv_step_sign_in,
+                                     hide_lemma=adv_step_ceremony,
+                                     hide_lemma=adv_step_recover_options,
+                                     hide_lemma=adversary_needs_compromise,
+                                     hide_lemma=session_origin_honest,
+                                     hide_lemma=resource_access_authentication,
+                                     hide_lemma=token_theft_needs_device_key]:
+  "All a cid rid pk g t g0 e0 #k #v #j.
+      CredReg(a, cid, rid, pk, g, t)@k & Recovered(a, g0, e0)@v & #k < #v
+    & CredUse(rid)@j & #v < #j
+      ==> F"
+
+/* ======================================================================
+ * 8. Sign-in: injective agreement with the authenticator and the device
+ * ==================================================================== */
+
+/* Every sign-in accepted with a platform credential and DPoP key thumbprint
+   jkt corresponds to an assertion the authenticator produced at the honest
+   origin for the honest RP ID over that challenge, in a ceremony that the
+   device with thumbprint jkt started; the challenge was requested by an
+   options request proven with the same key; and no other sign-in accepts
+   the same assertion -- unless that passkey was compromised.  (The binding
+   of the challenge to jkt holds with no exclusion at all, see chal_bound.) */
+lemma sign_in_injective_agreement [heuristic={assertion_bound},
+                                   hide_lemma=as_keys_secret,
+                                   hide_lemma=device_key_secret,
+                                   hide_lemma=ceremony_device,
+                                   hide_lemma=chal_single_use,
+                                   hide_lemma=token_origin,
+                                   hide_lemma=at_origin,
+                                   hide_lemma=session_origin,
+                                   hide_lemma=epoch_no_return,
+                                   hide_lemma=gen_no_return,
+                                   hide_lemma=epoch_origin,
+                                   hide_lemma=gen_origin,
+                                   hide_lemma=epoch_change_origin,
+                                   hide_lemma=epoch_changed_gone,
+                                   hide_lemma=adv_step_new_account,
+                                   hide_lemma=adv_step_token_use,
+                                   hide_lemma=adv_step_sign_in,
+                                   hide_lemma=adv_step_ceremony,
+                                   hide_lemma=adv_step_recover_options,
+                                   hide_lemma=adversary_needs_compromise,
+                                   hide_lemma=session_origin_honest,
+                                   hide_lemma=resource_access_authentication,
+                                   hide_lemma=token_theft_needs_device_key]:
+  "All a cid pk c rec jkt #i #p.
+      AcceptAssertion(a, cid, pk, c, rec, jkt)@i & PlatformKey(pk)@p
+      ==> ( (Ex #j #o. Asserted(pk, c, 'rp', <'rp', 'app'>, jkt)@j & #j < #i
+                     & ChalIssued(c, jkt)@o & #o < #j)
+          & not (Ex a2 cid2 rec2 jkt2 #i2.
+                   AcceptAssertion(a2, cid2, pk, c, rec2, jkt2)@i2 & not (#i2 = #i)) )
+        | (Ex u #j. CompromisePasskey(u, pk)@j)"
+
+#endif
+
+end
