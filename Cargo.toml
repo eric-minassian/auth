@@ -1,0 +1,72 @@
+[workspace]
+resolver = "3"
+members = ["crates/auth-core", "crates/auth-service", "crates/auth-verifier"]
+exclude = ["fuzz"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+publish = false
+repository = "https://github.com/eric-minassian/auth"
+
+[workspace.dependencies]
+auth-core = { path = "crates/auth-core" }
+auth-verifier = { path = "crates/auth-verifier" }
+
+# Verification. The vstd version is pinned to the Verus release used in CI
+# (see docs/verification.md); bump both together.
+vstd = "=0.0.0-2026-11-01-0251"
+
+aws-lc-rs = "1.19.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+thiserror = "2.0.21"
+
+axum = { version = "0.8.9", default-features = false }
+tokio = { version = "1.54.1", default-features = false }
+lambda_http = { version = "1.3.2", default-features = false }
+tower = { version = "0.5.3", default-features = false }
+tower-http = { version = "0.7.1", default-features = false }
+http = "1.5.0"
+http-body-util = "0.1.5"
+bytes = "1.12.1"
+serde_urlencoded = "0.7.1"
+futures = "0.3.34"
+
+aws-config = { version = "1.13.2", default-features = false }
+aws-sdk-dynamodb = { version = "1.139.0", default-features = false }
+aws-sdk-kms = { version = "1.131.0", default-features = false }
+aws-smithy-types = "1.9.4"
+
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", default-features = false }
+reqwest = { version = "0.13.5", default-features = false }
+
+proptest = "1.12.0"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+unused_must_use = "deny"
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(verus_only)", "cfg(kani)", "cfg(fuzzing)"] }
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+module_name_repetitions = "allow"
+# Internal crates (publish = false): errors are documented on the types and in docs/protocol.md.
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
+overflow-checks = true

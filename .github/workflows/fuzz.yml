@@ -1,0 +1,38 @@
+name: Fuzz
+
+on:
+  pull_request:
+    paths:
+      - "crates/auth-core/**"
+      - "fuzz/**"
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: Fuzz ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [encodings, cbor_cose, wire, webauthn, jose]
+    env:
+      # Short smoke runs on pull requests, longer runs nightly.
+      SECONDS_PER_TARGET: ${{ github.event_name == 'pull_request' && '120' || '1800' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup toolchain install nightly --profile minimal
+      - run: cargo +nightly install --locked cargo-fuzz@0.13.2
+      - name: Fuzz
+        working-directory: fuzz
+        run: cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=${SECONDS_PER_TARGET} -dict=dict/json.dict
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: fuzz/artifacts

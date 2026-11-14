@@ -1,0 +1,26 @@
+# Rust
+/target/
+/fuzz/target/
+/fuzz/corpus/
+/fuzz/artifacts/
+/fuzz/coverage/
+
+# Node
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+
+# CDK
+infra/cdk.out/
+infra/cdk.context.json
+
+# Tamarin
+model/*.spthy.proof
+model/output/
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp

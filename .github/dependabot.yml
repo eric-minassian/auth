@@ -1,0 +1,28 @@
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      aws-sdk:
+        patterns: ["aws-*"]
+    ignore:
+      # vstd is pinned to the Verus release in scripts/install-tools.sh; bump both together.
+      - dependency-name: vstd
+  - package-ecosystem: cargo
+    directory: /fuzz
+    schedule:
+      interval: monthly
+  - package-ecosystem: npm
+    directory: /sdk/web
+    schedule:
+      interval: weekly
+  - package-ecosystem: npm
+    directory: /infra
+    schedule:
+      interval: weekly
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

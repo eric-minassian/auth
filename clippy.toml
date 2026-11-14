@@ -1,0 +1,6 @@
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-indexing-slicing-in-tests = true
+# Proper nouns used throughout the docs; ".." keeps clippy's defaults.
+doc-valid-idents = ["WebAuthn", "DPoP", "EdDSA", "COSE_Key", "DynamoDB", "OAuth", "WebCrypto", "AWS-LC", "SubjectPublicKeyInfo", "ECDSA-Sig-Value", "..",]
