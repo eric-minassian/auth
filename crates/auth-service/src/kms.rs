@@ -179,34 +179,31 @@ impl KmsSigner {
     }
 }
 
-/// Validates that `key_id` is an `HMAC_256` / `GENERATE_VERIFY_MAC` key.
+/// Validates that `key_id` is usable as the nonce MAC key. KMS only accepts
+/// `GenerateMac` with `HMAC_SHA_256` on an `HMAC_256` / `GENERATE_VERIFY_MAC`
+/// key, so a successful call with a 32-byte result proves both, using only the
+/// permission the service needs anyway (no `kms:DescribeKey`).
 pub async fn check_hmac_key(client: &Client, key_id: &str) -> Result<(), KeyError> {
     let out = client
-        .describe_key()
+        .generate_mac()
         .key_id(key_id)
+        .message(Blob::new(b"auth-dpop-nonce-key-check".to_vec()))
+        .mac_algorithm(MacAlgorithmSpec::HmacSha256)
         .send()
         .await
         .map_err(|e| {
             key_error(
                 key_id,
                 format!(
-                    "DescribeKey failed: {}",
+                    "GenerateMac failed (the key must be HMAC_256 with GENERATE_VERIFY_MAC usage): {}",
                     aws_sdk_kms::error::DisplayErrorContext(e)
                 ),
             )
         })?;
-    let meta = out
-        .key_metadata()
-        .ok_or_else(|| key_error(key_id, "no key metadata"))?;
-    if meta.key_spec() != Some(&KeySpec::Hmac256)
-        || meta.key_usage() != Some(&KeyUsageType::GenerateVerifyMac)
-    {
-        return Err(key_error(
-            key_id,
-            "key must be HMAC_256 with GENERATE_VERIFY_MAC usage",
-        ));
+    match out.mac() {
+        Some(mac) if mac.as_ref().len() == 32 => Ok(()),
+        _ => Err(key_error(key_id, "GenerateMac returned an unexpected MAC")),
     }
-    Ok(())
 }
 
 const NONCE_DOMAIN: &[u8] = b"auth-dpop-nonce-v1";
